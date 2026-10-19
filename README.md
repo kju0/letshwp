@@ -1,2 +1,165 @@
 # letshwp
-렛츠한글
+렛츠한글 — HWPX 문서의 내용과 구조는 그대로 두고 서식만 표준에 맞추는 도구.
+
+현재 구성: **Inspector(분석)** → **Checker(표준 검사)** → Formatter(서식 수정, 개발 예정)
+
+표준 라이브러리만 사용한다(Python 3.10+). 외부 패키지·네트워크 없이 폐쇄망에서 실행된다.
+
+```
+config/format_standard.json   표준값 설정 (FORMAT_SPEC.md 를 검사기가 읽는 형태로 옮긴 것)
+src/inspector.py              분석기 CLI        src/hwpx_analysis/  분석 모듈
+src/checker.py                검사기 CLI        src/hwpx_check/     검사 규칙·보고서
+tests/                        자동 테스트 (python3 -m unittest discover -s tests -v)
+```
+
+---
+
+## 1. Inspector (분석기)
+
+HWPX 의 문단·글자·표·그림·페이지 설정을 추출하고, 문단 역할(제목/본문/주석 등)을 근거·신뢰도와 함께 추정한다.
+
+```
+python3 src/inspector.py samples/문서.hwpx -o output/문서.json --report output/문서.txt
+```
+
+구조 분석 근거는 [docs/HWPX_STRUCTURE.md](docs/HWPX_STRUCTURE.md) 참조.
+
+---
+
+## 2. Checker (표준 서식 검사기)
+
+### 역할
+Inspector 결과를 [FORMAT_SPEC.md](FORMAT_SPEC.md) 의 표준(값은 `config/format_standard.json`)과 비교해서
+
+- 어떤 항목이 표준에 맞는지(PASS), 다른지(FAIL)
+- 판단에 필요한 정보가 부족한 항목은 무엇인지(UNKNOWN)
+- 다를 경우 현재값과 표준값, 권장 수정 방법
+- Formatter 가 바꿔야 할 서식 속성(XML 위치 포함)
+
+을 JSON 과 TXT 로 출력한다. **원본 HWPX 는 수정하지 않는다.**
+
+### 실행
+
+```
+# A. Inspector 결과 JSON 입력
+python3 src/checker.py output/문서.json  -o output/문서_check.json --report output/문서_check.txt
+
+# B. HWPX 직접 입력 (내부에서 Inspector 실행)
+python3 src/checker.py samples/문서.hwpx -o output/문서_check.json --report output/문서_check.txt
+```
+
+- `-o` 생략 시 `output/<이름>_check.json` 에 저장. `--report` 는 선택.
+- `--config 경로` 로 다른 표준값 설정 파일을 쓸 수 있다.
+- Inspector 검증(`verification.all_ok`)이 실패한 분석 결과는 검사하지 않고 종료한다(종료 코드 2).
+
+### Inspector → Checker 연속 실행
+
+```
+python3 src/inspector.py samples/test1.hwpx -o output/test1-output.json --report output/test1-report.txt
+python3 src/checker.py   output/test1-output.json -o output/test1_check.json --report output/test1_check.txt
+```
+
+분석 결과를 따로 볼 필요가 없으면 B 방식 한 번으로 같은 검사 결과를 얻는다(두 방식의 결과는 동일함을 테스트로 확인).
+
+### 입력과 결과 파일
+
+| 파일 | 내용 |
+|---|---|
+| 입력 `.json` | Inspector 결과 (`schema_version`, `paragraphs`, `format_definitions`, `verification` 필수) |
+| 입력 `.hwpx` | 원본 문서. 읽기만 하며 검사 전후 SHA-256 을 비교한다 |
+| `*_check.json` | 검사 결과 (아래 구조) |
+| `*_check.txt` | 사람이 읽는 한국어 보고서 |
+
+`*_check.json` 주요 키
+
+| 키 | 내용 |
+|---|---|
+| `document` | 검사 문서명, 경로, SHA-256, 입력 방식, 원본 불변 여부 |
+| `summary` | 전체/상태별 건수, 항목별 건수 (`by_rule`) |
+| `results[]` | 검사 결과 1건씩 (아래) |
+| `fix_plan` | Formatter 입력: `preservation_rules`, `auto_actions`, `role_based_actions`, `manual_review` |
+
+`results[]` 한 건의 필드
+
+| 필드 | 의미 |
+|---|---|
+| `id`, `rule_id`, `rule_name`, `spec_mode` | 결과 ID, 검사 항목, FORMAT_SPEC 처리 방식 |
+| `target` | 위치: `paragraph_index`(Inspector 문단 번호), `path`(XML 위치, 예 `sec0/p16/tbl0/r0c0/p0`), 표·셀 |
+| `role` | Inspector 가 **추정한** 역할·신뢰도 (`source` 에 추정임을 표시) |
+| `current` | HWPX 에서 **추출한 실제** 현재값과 참조 정의(`refs`: charPr/paraPr id) |
+| `expected` | 표준값과 근거(FORMAT_SPEC 문구) |
+| `status`, `reason` | PASS/FAIL/UNKNOWN/SKIP 과 판단 근거 |
+| `fix` | `possible`(수정 가능 여부), `mode`, `recommendation`(권장 방법), `actions`(서식 변경 동작) |
+| `unknown_reason`, `needed_info`, `observation` | 판단하지 못한 이유, 추가로 필요한 정보, '분석만' 항목의 관찰 결과 |
+
+### 검사 결과 상태
+
+| 상태 | 의미 |
+|---|---|
+| `PASS` | 실제 현재값과 표준값을 비교해 일치 |
+| `FAIL` | 실제 현재값과 표준값을 비교해 다르며 수정 필요 |
+| `UNKNOWN` | 판단 불가 — 현재값 없음, 역할 미분류/신뢰도 미달(기준 0.6), 표준값 미확정, '분석만' 항목의 불일치 |
+| `SKIP` | 현재 검사 범위 밖 — 명세에 해당 역할 기준이 없음(머리말·차례·표 내부 글꼴 등), 렌더링 정보 필요 |
+
+수정 구분(`fix.mode`): `auto`(자동 수정) / `auto_if_role_confirmed`(추정 역할 확인 후 자동 수정) /
+`manual_review`(날짜·시간·번호·기호 등 텍스트 변경이 필요해 자동 수정하지 않음) / `none`(분석만).
+
+### TXT 보고서 읽는 법
+
+- **① 문서 검사 요약**: 상태별 건수와 항목별 표.
+- **② 수정이 필요한 항목**: FAIL 1건마다 위치·구분(추정 역할)·현재값·표준값·판단 근거·수정 방법.
+- **③ 표준에 적합한 항목**: 항목·표준값별 PASS 건수와 문단 번호.
+- **④ 판단 불가 및 검사 제외 항목**: 같은 사유끼리 묶어 사유와 필요한 정보를 표시.
+- **⑤ 향후 수정 계획**: 보존 조건과 Formatter 가 바꿀 charPr/paraPr/pagePr 목록.
+  `정의 복제 필요`는 바꿀 정의를 다른 문단도 쓰고 있어 그대로 바꾸면 영향이 번진다는 뜻이다.
+- 위치의 `#번호`는 **Inspector 문단 인덱스**(0부터, 표·머리말 문단 포함 문서 순서)이며 쪽 번호가 아니다.
+  쪽 번호는 렌더링 없이는 알 수 없으므로 출력하지 않는다. `표 T1 1행 1열`은 1부터 센 셀 위치다.
+
+### 지원 검사 항목
+
+| 항목 | 처리 방식 | 판정 |
+|---|---|---|
+| 용지 크기 (A4) | 자동 수정 | PASS/FAIL |
+| 용지 방향 (세로) | 자동 수정 | PASS 또는 UNKNOWN (landscape 속성 의미 미확인이라 FAIL 은 내지 않음) |
+| 글꼴 (본문·표/그림 제목·주석 휴먼명조, 대·중제목 HY헤드라인M) | 분석 후 수정 | PASS/FAIL, 소제목·문서 제목은 UNKNOWN |
+| 장평 100% / 자간 0% (한글·영문 슬롯) | 자동 수정 | PASS/FAIL (역할 무관) |
+| 줄 간격 (본문 160, 주석 130, 표/그림 제목 110) | 분석 후 수정 | PASS/FAIL, 표 내부는 UNKNOWN |
+| 문단 정렬 (본문·주석 양쪽, 표 내부 가운데) | 분석 후 수정 | PASS/FAIL, 제목류·숫자 셀·1×1 표는 UNKNOWN |
+| 머리말·꼬리말 여백 10/10mm | 분석만 | 일치 시 PASS, 불일치 시 UNKNOWN |
+| 문서 제목 박스 높이 15mm | 검사만 | PASS/FAIL (자동 수정 안 함) |
+| 항목 번호 형식 (1. 가. 1) 가) ① ㉮) | 검사만 | PASS/FAIL (자동 수정 안 함) |
+| 항목 기호 (□ ㅇ - ․, 영문 o 등 혼동 문자 감지) | 검사만 | PASS/FAIL (자동 수정 안 함) |
+| 날짜 표기 (2015. 4. 2.) | 검사만 | PASS/FAIL (자동 수정 안 함) |
+| 시간 표기 (24시간제 14:50) | 검사만 | PASS/FAIL, 'N시' 표기는 UNKNOWN |
+
+### 미지원 / 판단 불가 항목
+
+| 항목 | 이유 |
+|---|---|
+| 페이지 여백 20/20/20/10mm | 방향별 대응 미확정 → UNKNOWN (값 집합 일치 여부만 관찰) |
+| 글자 크기 | 표준값 미확정 → UNKNOWN (역할별 분포 제공) |
+| 문단 간 간격 | 산정 방식 미확정 → UNKNOWN (분포 제공) |
+| 어절 단위 자간 조정 | 렌더링 결과 필요·방식 미확정 → SKIP |
+| 제목 박스 양단선 1mm | '양단선' 정의 미확정 → UNKNOWN (위·아래 테두리로 해석 시 일치 여부만 관찰) |
+| 제목 박스 필요 여부 | 표지·목차 판단 기준 미확정 → 박스가 없으면 UNKNOWN |
+| 항목 번호 상하위 순서 | 들여쓰기 1칸 단위 미확정 → UNKNOWN |
+
+### 알려진 제한사항
+
+- 역할별 기준이 필요한 항목은 Inspector 의 **추정 역할**에 의존한다. 신뢰도가 기준(0.6)에 겨우 걸치는 문단은
+  역할이 틀릴 수 있으므로 해당 FAIL 은 `auto_if_role_confirmed`(확인 후 수정)로 표시된다.
+- 글꼴은 한글 언어 슬롯만, 장평·자간은 한글·영문 슬롯만 비교한다(나머지 슬롯 기준이 명세에 없음).
+- 혼재 문단은 공백이 아닌 글자를 가진 모든 글자 모양을 검사한다. 공백만 있는 run 은 검사하지 않지만
+  수정 계획의 `정의 복제 필요` 판단에는 포함한다.
+- 날짜·시간 감지는 정규식 기반이다. 4자리 연도(19xx/20xx)와 'YY 형식만 날짜로 본다.
+- 자간을 0%로 바꾸면 줄·쪽 나눔이 달라질 수 있다(어절 단위 조정 방식이 미확정이라 고려하지 않음).
+- `config/format_standard.json` 은 FORMAT_SPEC.md 와 수동으로 맞춰야 한다. 명세를 바꾸면 설정도 함께 바꾼다.
+
+---
+
+## 3. 테스트
+
+```
+python3 -m unittest discover -s tests -v                       # Inspector + Checker 전체
+HWPX_SAMPLE_DIR=samples python3 -m unittest tests.test_inspector   # 실제 샘플 포함
+```
