@@ -70,7 +70,7 @@ hs:sec
     │  ├ hp:pic          hc:img@binaryItemIDRef, hp:orgSz / hp:curSz / hp:sz / hp:pos
     │  ├ hp:rect …       도형. hp:drawText > hp:subList 에 글상자 문단
     │  └ hp:container    묶음 개체(내부에 pic/도형)
-    └ hp:linesegarray    레이아웃 캐시 — 서식 분석에 사용하지 않음
+    └ hp:linesegarray    레이아웃 캐시 — 서식값 추출에는 쓰지 않고 줄 수만 보조 정보로 사용(아래 참조)
 ```
 
 - `hp:p@id` 는 중복값(예: 2147483648)이 흔해 식별자로 쓸 수 없다. 분석기는 XML 위치 경로(`sec0/p12/tbl0/r1c2/p0`)를 식별자로 쓴다.
@@ -78,6 +78,15 @@ hs:sec
 - 캡션: 규격상 `hp:caption`(표/그림 하위)이 있으나 **샘플 5종 모두 캡션을 일반 문단("<그림 1> …")으로 작성**했다.
   → 분류기는 두 경우를 모두 처리한다.
 - 표지 제목이 1열 표(제목 박스, s2/s3) 또는 글상자(s5)에 들어가는 경우가 관측됨.
+
+## 3-1. hp:linesegarray (줄 배치 캐시)
+
+- 한글이 저장 시 문단의 줄마다 `hp:lineseg`(textpos=줄 시작 글자 위치, horzpos/horzsize=줄 가로 위치·폭)를 기록한다.
+- 관측(샘플 6종 전수): 내어쓰기(`intent<0`)가 있는 여러 줄 문단 36개 모두 첫 줄과 둘째 줄의 horzpos·horzsize 가 같았다.
+  즉 **들여쓰기/내어쓰기는 horzpos 에 반영되지 않는다**. 줄 시작 위치 비교에 쓰면 잘못된 판정이 나온다.
+- 따라서 분석기는 linesegarray 에서 **줄 수(줄바꿈 여부)만** 판단에 사용하고(`paragraphs[].line_layout`),
+  둘째 줄 정렬은 문단 모양의 `hh:margin/hc:intent` 로 판단한다. 작성 프로그램이 한글이 아니면 캐시를 신뢰하지 않는다.
+- test1 의 `□` 항목 내어쓰기 값(예 29.45pt ≈ 14pt 기준 `"  □ "` 폭)은 음수 intent = 내어쓰기 해석과 일치한다.
 
 ## 4. 해석 미확정 항목
 
@@ -95,7 +104,8 @@ hs:sec
 | `package` | mimetype, manifest, spine, 엔트리 목록 |
 | `document.sections[]` | 용지·여백·단·쪽 번호·머리말/꼬리말 |
 | `format_definitions` | header.xml 전체 해석(글꼴, charPr, paraPr, 스타일, 테두리/배경, 번호) |
-| `paragraphs[]` | 문단별 경로·문맥·텍스트·대표 글자/문단 서식·run·자동번호·항목기호·**role(근거·신뢰도·후보)** |
+| `paragraphs[]` | 문단별 경로·문맥·텍스트·대표 글자/문단 서식·run·자동번호·항목기호·**role(근거·신뢰도·후보)**·`line_layout`(줄 수)·`hierarchy`(1~6단계 계층, 소속/비교 항목) |
+| `hierarchy` | 계층별 항목 수, 계층 대응이 없는 번호·기호 목록 |
 | `tables[]` | 행/열, 셀(병합·크기·여백·배경·세로정렬·문단), 격자 검증, **표 내부 서식 요약** |
 | `pictures[]`, `shapes[]`, `other_objects[]`, `notes[]` | 개체 정보 |
 | `classification` | 본문 기준값(크기·글꼴·분포), 임계값, 역할 라벨 |

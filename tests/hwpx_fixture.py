@@ -192,6 +192,11 @@ PICTURE = (
     '<hp:outMargin left="0" right="0" top="0" bottom="0"/></hp:pic>'
 )
 
+# 한글 저장 파일의 hp:linesegarray 형태(2줄). 줄 배치 캐시 추출 테스트용
+LINESEG_2 = ('<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="1200" textheight="1200" baseline="1020" '
+             'spacing="720" horzpos="0" horzsize="48188" flags="393216"/><hp:lineseg textpos="30" vertpos="1920" '
+             'vertsize="1200" textheight="1200" baseline="1020" spacing="720" horzpos="0" horzsize="48188" flags="393216"/>'
+             '</hp:linesegarray>')
 BODY1 = "현재 사업은 계획대로 추진되고 있으며 주요 지표가 전년 대비 개선되었다."
 BODY2_A = "세부 항목은"
 BODY2_B = "다음과 같이 정리하였다."
@@ -200,7 +205,7 @@ SECTION = XML_HEAD + '<hs:sec %s>%s</hs:sec>' % (NS_DECL, "".join([
     _p(1, 0, '<hp:run charPrIDRef="0">%s%s</hp:run><hp:run charPrIDRef="0">%s</hp:run>' % (SEC_PR, HEADER_CTRL, _t("보고서 제목"))),
     _p(2, 1, _t("Ⅰ. 추진 배경")),
     _p(0, 3, _t("1. 현황 분석")),
-    _p(0, 2, '<hp:run charPrIDRef="2">%s</hp:run><hp:run charPrIDRef="2">%s</hp:run>' % (_t(BODY1), FOOTNOTE)),
+    _p(0, 2, '<hp:run charPrIDRef="2">%s</hp:run><hp:run charPrIDRef="2">%s</hp:run>%s' % (_t(BODY1), FOOTNOTE, LINESEG_2)),
     _p(0, 2, '<hp:run charPrIDRef="2"><hp:t>%s<hp:tab width="4000" leader="0" type="1"/>%s</hp:t></hp:run>'
              '<hp:run charPrIDRef="3"><hp:t><hp:lineBreak/>강조</hp:t></hp:run><hp:run charPrIDRef="2"><hp:t> 문구를 포함한 문장이다.</hp:t></hp:run>' % (BODY2_A, BODY2_B)),
     _p(3, 4, _t("※ 자료: 내부 통계")),

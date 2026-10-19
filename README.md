@@ -50,6 +50,10 @@ python3 src/checker.py samples/문서.hwpx -o output/문서_check.json --report 
 
 - `-o` 생략 시 `output/<이름>_check.json` 에 저장. `--report` 는 선택.
 - `--config 경로` 로 다른 표준값 설정 파일을 쓸 수 있다.
+- `--doc-type A|B` 로 문서 유형을 지정하면 TYPE A/B 문단 간격 특례(5.6)를 검사한다.
+  판별 기준이 미확정이라 자동 판별하지 않으며, 지정하지 않으면 특례 대상 문단은 판단 불가로 보고한다.
+  - TYPE A: 첫 페이지 제목 표 → 첫 `1.` 항목 문단 위 20pt (제목 표가 문서 첫 요소이고 사이에 빈 문단만 있으며 쪽 나눔이 없을 때만)
+  - TYPE B: 목차 다음 쪽 첫 `1.` 항목 문단 위 0pt (그 문단에 쪽 나눔 속성이 있을 때만)
 - Inspector 검증(`verification.all_ok`)이 실패한 분석 결과는 검사하지 않고 종료한다(종료 코드 2).
 
 ### Inspector → Checker 연속 실행
@@ -74,7 +78,7 @@ python3 src/checker.py   output/test1-output.json -o output/test1_check.json --r
 
 | 키 | 내용 |
 |---|---|
-| `document` | 검사 문서명, 경로, SHA-256, 입력 방식, 원본 불변 여부 |
+| `document` | 검사 문서명, 경로, SHA-256, 입력 방식, 원본 불변 여부, 문서 유형(`document_type`), 항목 계층 요약(`hierarchy`) |
 | `summary` | 전체/상태별 건수, 항목별 건수 (`by_rule`) |
 | `results[]` | 검사 결과 1건씩 (아래) |
 | `fix_plan` | Formatter 입력: `preservation_rules`, `auto_actions`, `role_based_actions`, `manual_review` |
@@ -90,7 +94,10 @@ python3 src/checker.py   output/test1-output.json -o output/test1_check.json --r
 | `expected` | 표준값과 근거(FORMAT_SPEC 문구) |
 | `status`, `reason` | PASS/FAIL/UNKNOWN/SKIP 과 판단 근거 |
 | `fix` | `possible`(수정 가능 여부), `mode`, `recommendation`(권장 방법), `actions`(서식 변경 동작) |
-| `unknown_reason`, `needed_info`, `observation` | 판단하지 못한 이유, 추가로 필요한 정보, '분석만' 항목의 관찰 결과 |
+| `unknown_reason`, `needed_info`, `observation` | 판단하지 못한 이유, 추가로 필요한 정보, 관찰 결과(빈 문단 중복 간격 등) |
+| `sub_item` | 한 항목의 세부 검사(예: 내어쓰기의 `번호·기호 뒤 공백` / `둘째 줄 정렬`) |
+| `hierarchy` | (문단 간 간격) 계층·번호, 비교 대상 항목(`compare_with`), 소속 항목(`owner_item`) |
+| `interpretation_note` | 명세 6장 미확정 해석에 해당하는 판정에 붙는 주의 |
 
 ### 검사 결과 상태
 
@@ -121,9 +128,12 @@ python3 src/checker.py   output/test1-output.json -o output/test1_check.json --r
 |---|---|---|
 | 용지 크기 (A4) | 자동 수정 | PASS/FAIL |
 | 용지 방향 (세로) | 자동 수정 | PASS 또는 UNKNOWN (landscape 속성 의미 미확인이라 FAIL 은 내지 않음) |
-| 글꼴 (본문·표/그림 제목·주석 휴먼명조, 대·중제목 HY헤드라인M) | 분석 후 수정 | PASS/FAIL, 소제목·문서 제목은 UNKNOWN |
+| 글꼴 (대·중제목 HY헤드라인M, 그 외 본문·주석·소제목·표 내부·머리말 등 휴먼명조) | 분석 후 수정 | PASS/FAIL, 문서 제목은 UNKNOWN(표지 여부 판별 불가) |
 | 장평 100% / 자간 0% (한글·영문 슬롯) | 자동 수정 | PASS/FAIL (역할 무관) |
 | 줄 간격 (본문 160, 주석 130, 표/그림 제목 110) | 분석 후 수정 | PASS/FAIL, 표 내부는 UNKNOWN |
+| 문단 간 간격 (계층 16/15/14pt, 2↔3단계 14pt, 일반 본문 6pt, TYPE A 20pt / B 0pt) | 분석 후 수정 | PASS/FAIL, 계층 미정·소속 모호·유형 미지정은 UNKNOWN |
+| 항목 줄바꿈 정렬 - 번호·기호 뒤 공백 한 칸 | 분석 후 수정 | PASS/FAIL (글자 변경 금지라 수동 검토) |
+| 항목 줄바꿈 정렬 - 둘째 줄 정렬(내어쓰기) | 분석 후 수정 | 여러 줄인데 내어쓰기가 없으면 FAIL, 내어쓰기가 있으면 UNKNOWN(너비 검증 불가) |
 | 문단 정렬 (본문·주석 양쪽, 표 내부 가운데) | 분석 후 수정 | PASS/FAIL, 제목류·숫자 셀·1×1 표는 UNKNOWN |
 | 머리말·꼬리말 여백 10/10mm | 분석만 | 일치 시 PASS, 불일치 시 UNKNOWN |
 | 문서 제목 박스 높이 15mm | 검사만 | PASS/FAIL (자동 수정 안 함) |
@@ -138,7 +148,10 @@ python3 src/checker.py   output/test1-output.json -o output/test1_check.json --r
 |---|---|
 | 페이지 여백 20/20/20/10mm | 방향별 대응 미확정 → UNKNOWN (값 집합 일치 여부만 관찰) |
 | 글자 크기 | 표준값 미확정 → UNKNOWN (역할별 분포 제공) |
-| 문단 간 간격 | 산정 방식 미확정 → UNKNOWN (분포 제공) |
+| 기호(□ ㅇ - ․)·Ⅰ.·(1)·(가) 항목의 계층 | 명세 5.1 계층 표에 없음 → 그 항목과 다음 항목의 간격은 UNKNOWN. 확정되면 설정 `PARA_SPACING.bullet_levels` 에 지정(예 `{"□": 1}`) |
+| TYPE A/B 문서 유형 | 판별 기준 미확정 → `--doc-type` 미지정 시 UNKNOWN |
+| 내어쓰기 폭의 정확성 | 번호·기호 실제 글꼴 너비를 계산하지 않음 → 내어쓰기가 있으면 UNKNOWN (참고용 추정 글자 수 제공) |
+| 내어쓰기 자동 수정 값 | 목표 폭 계산에 글꼴 너비 필요 → 수정 계획은 수동 검토로 분류 |
 | 어절 단위 자간 조정 | 렌더링 결과 필요·방식 미확정 → SKIP |
 | 제목 박스 양단선 1mm | '양단선' 정의 미확정 → UNKNOWN (위·아래 테두리로 해석 시 일치 여부만 관찰) |
 | 제목 박스 필요 여부 | 표지·목차 판단 기준 미확정 → 박스가 없으면 UNKNOWN |
@@ -151,6 +164,12 @@ python3 src/checker.py   output/test1-output.json -o output/test1_check.json --r
 - 글꼴은 한글 언어 슬롯만, 장평·자간은 한글·영문 슬롯만 비교한다(나머지 슬롯 기준이 명세에 없음).
 - 혼재 문단은 공백이 아닌 글자를 가진 모든 글자 모양을 검사한다. 공백만 있는 run 은 검사하지 않지만
   수정 계획의 `정의 복제 필요` 판단에는 포함한다.
+- 문단 간 간격은 본문 최상위 문단만 대상이다(표 셀·머리말·각주·글상자 제외). 주석·캡션·개체·계층 미정 항목이 끼면
+  이후 문단의 소속이 모호하다고 보고 판단 불가로 둔다(5.4). 기존 빈 문단은 삭제하지 않고 `observation` 으로 보고한다.
+- 실제 하위 항목을 거쳐 상위로 복귀하는 경우(예 `가.` → `1)` → `나.`)는 5.3·5.9 대로 14pt 로 판정하되, 6장 미확정 사항이라 `interpretation_note` 를 붙인다.
+- 줄 수는 한글이 저장 시 기록한 `hp:linesegarray` 캐시로 판단한다. 작성 프로그램이 한글이 아니면 신뢰하지 않는다.
+  캐시의 줄 시작 위치(horzpos)에는 내어쓰기가 반영되지 않으므로(샘플 관찰) 정렬 판단에는 문단 모양의 들여쓰기 값을 쓴다.
+- 글꼴 명세의 '휴면명조'는 '휴먼명조'의 오기로 보고 휴먼명조로 검사한다.
 - 날짜·시간 감지는 정규식 기반이다. 4자리 연도(19xx/20xx)와 'YY 형식만 날짜로 본다.
 - 자간을 0%로 바꾸면 줄·쪽 나눔이 달라질 수 있다(어절 단위 조정 방식이 미확정이라 고려하지 않음).
 - `config/format_standard.json` 은 FORMAT_SPEC.md 와 수동으로 맞춰야 한다. 명세를 바꾸면 설정도 함께 바꾼다.
@@ -160,6 +179,6 @@ python3 src/checker.py   output/test1-output.json -o output/test1_check.json --r
 ## 3. 테스트
 
 ```
-python3 -m unittest discover -s tests -v                       # Inspector + Checker 전체
+python3 -m unittest discover -s tests -v                       # Inspector + Checker + 신규 규칙(test_spacing_rules) 전체
 HWPX_SAMPLE_DIR=samples python3 -m unittest tests.test_inspector   # 실제 샘플 포함
 ```

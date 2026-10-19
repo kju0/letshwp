@@ -122,15 +122,20 @@ class CheckerFixtureTest(unittest.TestCase):
     # 5. 표준값 미확정 -> UNKNOWN/SKIP
     def test_undecided_standard(self):
         self.assertEqual(one(self.results, "FONT_SIZE")["status"], "UNKNOWN")
-        self.assertEqual(one(self.results, "PARA_SPACING")["status"], "UNKNOWN")
         title = one(self.results, "FONT", "보고서 제목")
         self.assertEqual(title["status"], "UNKNOWN")
+        self.assertIn("표지", title["unknown_reason"])
+
+    def test_font_other_elements_are_human_myeongjo(self):
+        # 개정 명세: 소제목 및 기타 요소(표 내부·머리말 등)는 휴먼명조
         ins = copy.deepcopy(self.inspection)
-        p = para(ins, "1. 현황")
-        p["role"].update(role="heading_3", label="소제목")
+        para(ins, "1. 현황")["role"].update(role="heading_3", label="소제목")
         r = one(self.check(ins), "FONT", "1. 현황")
-        self.assertEqual(r["status"], "UNKNOWN")
-        self.assertIn("소제목", r["unknown_reason"])
+        self.assertEqual((r["status"], r["expected"]["value"]), ("PASS", "휴먼명조"))
+        cell = one(self.results, "FONT", "2024")
+        self.assertEqual((cell["status"], cell["current"]["value"], cell["expected"]["value"]),
+                         ("FAIL", "맑은 고딕", "휴먼명조"))
+        self.assertEqual(one(self.results, "FONT", "머리말 문구")["status"], "PASS")
 
     def test_analysis_only_mismatch_is_not_fail(self):
         ins = copy.deepcopy(self.inspection)
@@ -144,11 +149,13 @@ class CheckerFixtureTest(unittest.TestCase):
     # 6. 검사 제외
     def test_skip_items(self):
         self.assertEqual(one(self.results, "WORD_BREAK")["status"], "SKIP")
-        skips = find(self.results, "FONT", status="SKIP")
+        skips = find(self.results, "LINE_SPACING", status="SKIP")
         groups = {tuple(r["role"]["roles"]) for r in skips}
         self.assertIn(("머리말·꼬리말",), groups)
-        self.assertIn(("표 내부 텍스트",), groups)
-        for r in skips:
+        self.assertIn(("대제목",), groups)
+        spacing_skips = find(self.results, "PARA_SPACING", status="SKIP")
+        self.assertTrue(any("본문 최상위 문단이 아님" in r["unknown_reason"] for r in spacing_skips))
+        for r in skips + spacing_skips:
             self.assertEqual(r["target"]["type"], "paragraph_group")
             self.assertTrue(r["unknown_reason"])
 
@@ -171,7 +178,7 @@ class CheckerFixtureTest(unittest.TestCase):
 
     def test_fix_plan_detects_shared_definitions(self):
         plan = self.result["fix_plan"]
-        font = [a for a in plan["role_based_actions"] if a["op"] == "set_char_font"]
+        font = [a for a in plan["role_based_actions"] if a["op"] == "set_char_font" and a["to"] == "HY헤드라인M"]
         self.assertEqual(len(font), 1)
         # 중제목의 charPr 를 본문 문단의 '강조' run 도 쓰므로 복제 필요
         self.assertTrue(font[0]["clone_required"])

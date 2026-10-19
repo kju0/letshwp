@@ -13,8 +13,11 @@
 - 역할은 Inspector 의 규칙 기반 추정값(role.source)이고, 서식값은 HWPX XML 추출값(current.source)이다.
 """
 
+import copy
 import re
 from collections import Counter, defaultdict
+
+from hwpx_analysis.hierarchy import annotate_hierarchy, level_spacing, detect_bullet, LEVEL_EXAMPLE
 
 PASS, FAIL, UNKNOWN, SKIP = "PASS", "FAIL", "UNKNOWN", "SKIP"
 
@@ -44,10 +47,16 @@ LINE_TYPE_LABEL = {"PERCENT": "글자에 따라", "FIXED": "고정 값", "BETWEE
 class Doc:
     """Inspector 결과(dict)와 표준 설정(dict)을 묶은 읽기 전용 접근자."""
 
-    def __init__(self, inspection, config):
+    def __init__(self, inspection, config, doc_type=None):
         self.r = inspection
         self.cfg = config
-        self.paragraphs = inspection.get("paragraphs") or []
+        # 계층 정보를 설정(bullet_levels)에 맞춰 다시 계산하므로 입력을 변경하지 않도록 복사해서 쓴다
+        self.paragraphs = copy.deepcopy(inspection.get("paragraphs") or [])
+        bullet_levels = (config["rules"].get("PARA_SPACING") or {}).get("bullet_levels") or {}
+        self.hierarchy_summary = annotate_hierarchy(self.paragraphs, bullet_levels)
+        self.doc_type = doc_type if doc_type is not None else config.get("document_type")
+        self.doc_type_source = ("CLI 지정" if doc_type is not None else
+                                "설정 파일" if config.get("document_type") else "미지정")
         self.tables = {t["id"]: t for t in inspection.get("tables") or []}
         fd = inspection.get("format_definitions") or {}
         self.char_props = fd.get("char_properties") or {}
@@ -110,15 +119,18 @@ def role_of(p):
 
 
 def make_result(doc, rule_id, status, reason, target=None, role=None, current=None, expected=None,
-                fix_actions=None, unknown_reason=None, needed_info=None, observation=None, extra=None):
+                fix_actions=None, unknown_reason=None, needed_info=None, observation=None, extra=None,
+                fix_mode=None, blocked_reason=None, recommendation=None):
     rc = doc.rule_cfg(rule_id)
-    mode = FIX_MODE_BY_SPEC.get(rc["spec_mode"], "none")
+    mode = fix_mode or FIX_MODE_BY_SPEC.get(rc["spec_mode"], "none")
     fix = {"mode": mode, "possible": False, "recommendation": None, "actions": []}
     if status == FAIL:
-        if mode in ("auto", "auto_if_role_confirmed") and fix_actions:
+        if mode in ("auto", "auto_if_role_confirmed") and fix_actions and not blocked_reason:
             fix["possible"] = True
             fix["actions"] = fix_actions
-        fix["recommendation"] = _recommendation(rule_id, rc, mode, current, expected, target)
+        if blocked_reason:
+            fix["blocked_reason"] = blocked_reason
+        fix["recommendation"] = recommendation or _recommendation(rule_id, rc, mode, current, expected, target)
     out = {
         "rule_id": rule_id,
         "rule_name": rc["name"],
@@ -159,13 +171,13 @@ def gate_by_role(doc, p, rule_id):
     반환: ("check", 표준값) | ("unknown_role", 사유) | ("undecided", 사유) | ("skip", 사유)"""
     rc = doc.rule_cfg(rule_id)
     role = p["role"]["role"]
-    if role in STRUCTURAL_SKIP_ROLES:
+    by_role = rc.get("by_role") or {}
+    if role in STRUCTURAL_SKIP_ROLES and role not in by_role:
         return "skip", STRUCTURAL_SKIP_ROLES[role]
     if role == "unclassified":
         return "unknown_role", "역할 미분류: %s" % (p["role"].get("unclassified_reason") or "근거 부족")
     if p["role"]["confidence"] < doc.role_min:
         return "unknown_role", "역할 신뢰도 %.2f < 기준 %.2f" % (p["role"]["confidence"], doc.role_min)
-    by_role = rc.get("by_role") or {}
     if role in by_role and by_role[role] is not None:
         return "check", by_role[role]
     undecided = rc.get("undecided_roles") or {}
@@ -353,14 +365,7 @@ def rule_header_footer_margin(doc):
 def rule_doc_title_box(doc):
     rc = doc.rule_cfg("DOC_TITLE_BOX")
     out = []
-    boxes = []
-    for t in doc.tables.values():
-        if t.get("context") != "body" or t.get("nesting_depth", 0) != 0 or t.get("cols") != 1 or (t.get("rows") or 0) > 3:
-            continue
-        titles = [i for c in t["cells"] for i in c["paragraphs"]
-                  if doc.paragraphs[i]["role"]["role"] == "document_title"]
-        if titles:
-            boxes.append((t, titles))
+    boxes = _title_boxes(doc)
     has_toc = any(p["role"]["role"] == "toc" for p in doc.paragraphs)
     if not boxes:
         out.append(make_result(doc, "DOC_TITLE_BOX", UNKNOWN, "제목 박스(문서 제목을 담은 1열 표)를 찾지 못함",
@@ -430,13 +435,303 @@ def rule_font_size(doc):
                         needed_info="역할별 글자 크기 표준값")]
 
 
+def _title_boxes(doc):
+    """본문 최상위의 1열·3행 이하 표 중 '문서 제목' 역할 문단을 담은 표(제목 박스)."""
+    boxes = []
+    for t in doc.tables.values():
+        if t.get("context") != "body" or t.get("nesting_depth", 0) != 0 or t.get("cols") != 1 or (t.get("rows") or 0) > 3:
+            continue
+        titles = [i for c in t["cells"] for i in c["paragraphs"]
+                  if doc.paragraphs[i]["role"]["role"] == "document_title"]
+        if titles:
+            boxes.append((t, titles))
+    return boxes
+
+
+def _body_scope(doc):
+    return [p for p in doc.paragraphs if (p.get("hierarchy") or {}).get("kind") not in (None, "out_of_scope")]
+
+
+def _type_special(doc):
+    """TYPE A/B 특례(5.6) 적용 대상과 확인 결과.
+    반환 None(대상 없음) 또는 {"paragraph", "status": applied|unconfirmed, "expected", "reason", "needed_info"}"""
+    rc = doc.rule_cfg("PARA_SPACING")
+    scope = _body_scope(doc)
+    first = next((p for p in scope if p["hierarchy"]["kind"] == "item" and p["hierarchy"]["level"] == 1), None)
+    if first is None:
+        return None
+    boxes = [t for t, _ in _title_boxes(doc) if t["anchor_paragraph"] < first["index"]]
+    tocs = [p["index"] for p in doc.paragraphs if p["role"]["role"] == "toc" and p["index"] < first["index"]]
+    dt = (doc.doc_type or "").upper() or None
+    out = {"paragraph": first["index"], "doc_type": dt}
+    if dt is None:
+        if boxes or tocs:
+            hint = "제목 표" if boxes else "목차"
+            return dict(out, status="unconfirmed", expected=None,
+                        reason="문서 첫 1단계 항목 앞에 %s가 있어 TYPE %s 특례 대상일 수 있으나 문서 유형이 지정되지 않음"
+                               % (hint, "A" if boxes else "B"),
+                        needed_info="TYPE A/B 판별 기준 확정(FORMAT_SPEC 6) 또는 --doc-type A|B 지정")
+        return None
+    between = lambda a, b: [p for p in scope if a < p["index"] < b]
+    if dt == "A":
+        if not boxes:
+            return dict(out, status="unconfirmed", expected=None,
+                        reason="TYPE A 지정이나 첫 1단계 항목 앞에서 제목 표(문서 제목을 담은 1열 표)를 찾지 못함",
+                        needed_info="제목 표 위치 확인")
+        anchor = boxes[0]["anchor_paragraph"]
+        before = [p for p in scope if p["index"] < anchor and p["hierarchy"]["kind"] != "empty"]
+        mid = between(anchor, first["index"])
+        if before:
+            return dict(out, status="unconfirmed", expected=None,
+                        reason="제목 표 앞에 다른 내용(#%d)이 있어 첫 페이지 제목 표인지 확인할 수 없음" % before[0]["index"],
+                        needed_info="첫 페이지 구성 확인")
+        if any(p["hierarchy"]["kind"] != "empty" for p in mid):
+            return dict(out, status="unconfirmed", expected=None,
+                        reason="제목 표와 첫 1단계 항목 사이에 다른 내용이 있어 두 요소 사이 간격으로 볼 수 없음",
+                        needed_info="대상 문단 확인")
+        if any(p.get("page_break_before") for p in mid + [first]):
+            return dict(out, status="unconfirmed", expected=None,
+                        reason="제목 표와 첫 1단계 항목 사이에 쪽 나눔이 있어 같은 첫 페이지인지 확인할 수 없음",
+                        needed_info="첫 페이지 구성 확인")
+        return dict(out, status="applied", expected=rc["type_a_first_item_pt"],
+                    reason="TYPE A: 첫 페이지 제목 표(%s) → 첫 1단계 항목" % boxes[0]["id"],
+                    blank_between=len(mid))
+    if dt == "B":
+        if not tocs:
+            return dict(out, status="unconfirmed", expected=None,
+                        reason="TYPE B 지정이나 첫 1단계 항목 앞에서 목차(차례) 문단을 찾지 못함",
+                        needed_info="목차 위치 확인")
+        if not first.get("page_break_before"):
+            return dict(out, status="unconfirmed", expected=None,
+                        reason="첫 1단계 항목에 쪽 나눔(pageBreak) 속성이 없어 목차 다음 페이지 시작인지 확인할 수 없음",
+                        needed_info="쪽 시작 위치 확인(렌더링 또는 쪽 나눔 속성)")
+        return dict(out, status="applied", expected=rc["type_b_first_item_pt"],
+                    reason="TYPE B: 목차(#%d) 다음 쪽에서 시작하는 첫 1단계 항목" % tocs[-1])
+    return dict(out, status="unconfirmed", expected=None, reason="알 수 없는 문서 유형 '%s'" % dt,
+                needed_info="문서 유형은 A 또는 B")
+
+
+def _item_label(level, marker):
+    return "%d단계 '%s'" % (level, marker or LEVEL_EXAMPLE.get(level, "?"))
+
+
 def rule_para_spacing(doc):
-    st = (doc.r.get("statistics") or {}).get("by_paragraph") or {}
-    obs = {k: {str(i["value"]): i["count"] for i in (st.get(k) or [])[:5]} for k in ("space_before_pt", "space_after_pt")}
-    return [make_result(doc, "PARA_SPACING", UNKNOWN, "문단 간 간격의 산정 방식이 미확정",
-                        current={"value": obs, "display": "문단 위/아래 간격 분포(pt, 문단 수)", "source": VALUE_SOURCE},
-                        unknown_reason="FORMAT_SPEC: '14pt 글자 크기의 1행'의 산정 방식 미확정, 처리 방식 '분석만'",
-                        needed_info="문단 간격을 문단 위/아래 여백으로 볼지, 빈 줄로 볼지 등 산정 방식")]
+    rc = doc.rule_cfg("PARA_SPACING")
+    tol = rc.get("tolerance_pt", 0.05)
+    special = _type_special(doc)
+    results, skipped = [], []
+    for p in doc.paragraphs:
+        h = p.get("hierarchy") or {}
+        kind = h.get("kind")
+        if kind in (None, "empty"):
+            continue
+        if kind == "out_of_scope":
+            if not p.get("is_empty") and p["role"]["role"] not in EXCLUDED_ROLES:
+                skipped.append((p, "본문 최상위 문단이 아님(표·머리말·각주·글상자 등) - 계층 간격 규칙 대상 아님"))
+            continue
+        if kind == "object":
+            skipped.append((p, "텍스트 없이 표·그림만 있는 문단 - 계층 간격 규칙 대상 아님"))
+            continue
+        if kind == "other":
+            skipped.append((p, "번호 없는 %s 문단 - 계층 간격 규칙(항목/일반 본문)으로 간격을 정할 수 없음" % p["role"]["label"]))
+            continue
+
+        pf = p.get("para_format") or {}
+        cur_v = pf.get("space_before_pt")
+        current = None if cur_v is None else {
+            "value": cur_v, "display": "문단 위 %gpt" % cur_v, "source": VALUE_SOURCE + " - paraPr/margin@prev",
+            "refs": {"para_pr_id": pf.get("para_pr_id")}, "role_label": p["role"]["label"]}
+        hier = {k: h.get(k) for k in ("kind", "level", "marker", "compare_with", "owner_item",
+                                      "previous_paragraph", "blank_paragraphs_before")}
+        observations = []
+        if h.get("blank_paragraphs_before"):
+            observations.append("앞에 빈 문단 %d개 - 시각적 중복 간격 가능(빈 문단은 삭제하지 않음)" % h["blank_paragraphs_before"])
+        prev = doc.paragraphs[h["previous_paragraph"]] if h.get("previous_paragraph") is not None else None
+        prev_after = ((prev or {}).get("para_format") or {}).get("space_after_pt")
+        if prev_after:
+            observations.append("직전 문단 #%d 의 문단 아래 간격 %gpt 가 별도로 있음" % (prev["index"], prev_after))
+        note = None
+
+        expected_pt, basis = None, None
+        if special and special["paragraph"] == p["index"]:
+            if special["status"] != "applied":
+                results.append(make_result(doc, "PARA_SPACING", UNKNOWN, "TYPE A/B 특례 대상 여부를 확정할 수 없음",
+                                           target_of(p), role_of(p), current, unknown_reason=special["reason"],
+                                           needed_info=special["needed_info"],
+                                           observation="; ".join(observations) or None,
+                                           extra={"hierarchy": hier, "sub_item": "TYPE A/B 특례"}))
+                continue
+            expected_pt, basis = special["expected"], special["reason"]
+        elif kind == "unmapped_item":
+            results.append(make_result(doc, "PARA_SPACING", UNKNOWN, "항목의 계층(1~6단계)을 정할 수 없음",
+                                       target_of(p), role_of(p), current,
+                                       unknown_reason="번호·기호 '%s' 의 계층 대응이 명세 5.1 에 없음" % h.get("marker"),
+                                       needed_info="FORMAT_SPEC 5.1 계층 표기에 해당 번호·기호 추가(기호는 설정 bullet_levels)",
+                                       extra={"hierarchy": hier}))
+            continue
+        elif kind == "item":
+            cw = h.get("compare_with")
+            if not cw:
+                results.append(make_result(doc, "PARA_SPACING", UNKNOWN, "비교할 직전 유효 항목이 없음",
+                                           target_of(p), role_of(p), current,
+                                           unknown_reason=h.get("compare_unavailable_reason"),
+                                           needed_info="직전 문단의 계층·소속 확정", extra={"hierarchy": hier}))
+                continue
+            expected_pt, why = level_spacing(cw["level"], h["level"], rc)
+            prev_marker = (doc.paragraphs[cw["paragraph"]].get("hierarchy") or {}).get("marker")
+            via = " (직전 일반 본문의 소속 항목)" if h.get("previous_kind") == "body" else ""
+            basis = "%s #%d%s → %s: %s" % (_item_label(cw["level"], prev_marker), cw["paragraph"], via,
+                                          _item_label(h["level"], h.get("marker")), why)
+            if cw["level"] == 3 and h["level"] == 2:
+                note = ("FORMAT_SPEC 6 미확정 사항(하위 항목을 거쳐 상위 단계로 복귀할 때의 간격 해석)에 해당. "
+                        "명세 5.3·5.9 에 따라 14pt 를 적용했으며 규칙 확정 시 재검토 필요")
+        elif kind == "body":
+            pk = h.get("previous_kind")
+            if pk not in ("item", "body"):
+                results.append(make_result(doc, "PARA_SPACING", UNKNOWN, "일반 본문의 직전 문단이 항목·본문이 아니어서 간격 기준이 모호",
+                                           target_of(p), role_of(p), current,
+                                           unknown_reason="직전 문단 종류: %s" % (pk or "없음(문서 첫 문단)"),
+                                           needed_info="일반 본문의 소속 관계 확인", extra={"hierarchy": hier}))
+                continue
+            expected_pt = rc["body_pt"]
+            owner = h.get("owner_item")
+            basis = "%s → 일반 본문%s" % ("항목" if pk == "item" else "일반 본문",
+                                         " (소속: %s #%d)" % (_item_label(owner["level"], (doc.paragraphs[owner["paragraph"]].get("hierarchy") or {}).get("marker")), owner["paragraph"]) if owner else " (소속 항목 없음)")
+
+        expected = {"value": expected_pt, "display": "문단 위 %gpt" % expected_pt,
+                    "basis": basis}
+        extra = {"hierarchy": hier}
+        if note:
+            extra["interpretation_note"] = note
+        if current is None:
+            results.append(make_result(doc, "PARA_SPACING", UNKNOWN, "문단 위 간격 값을 추출하지 못함",
+                                       target_of(p), role_of(p), None, expected,
+                                       unknown_reason="paraPr margin@prev 없음", needed_info="문단 모양 정의", extra=extra))
+            continue
+        ok = abs(cur_v - expected_pt) <= tol
+        actions = None if ok else [{
+            "op": "set_para_space_before", "para_pr_id": pf.get("para_pr_id"),
+            "xml": "Contents/header.xml hh:paraPr[@id=%s]//hh:margin/hc:prev@value" % pf.get("para_pr_id"),
+            "from": cur_v, "to": expected_pt,
+            "note": ("목표값으로 설정(기존값에 더하지 않음, 반복 적용해도 누적 없음). "
+                     "hp:switch case(HwpUnitChar)에는 pt×100, default 에는 그 2배 값이 기록되는 구조(샘플 전수 관찰)")}]
+        results.append(make_result(doc, "PARA_SPACING", PASS if ok else FAIL,
+                                   "문단 위 %gpt %s 기준 %gpt (%s)" % (cur_v, "=" if ok else "≠", expected_pt, basis),
+                                   target_of(p), role_of(p), current, expected, fix_actions=actions,
+                                   observation="; ".join(observations) or None, extra=extra))
+    return results + skip_group(doc, "PARA_SPACING", skipped)
+
+
+# 번호·기호 뒤 공백 판정에 쓰는 공백 문자
+WS_NAMES = {" ": "공백", "\t": "탭", "　": "전각 공백", " ": "묶음 빈칸", " ": "고정폭 빈칸"}
+
+
+def _layout_trusted(doc):
+    app = (((doc.r.get("package") or {}).get("version") or {}).get("application") or "")
+    names = doc.rule_cfg("HANGING_INDENT").get("trusted_layout_applications") or []
+    return any(n.lower() in app.lower() for n in names), app
+
+
+def rule_hanging_indent(doc):
+    rc = doc.rule_cfg("HANGING_INDENT")
+    trusted, app = _layout_trusted(doc)
+    results, skipped = [], []
+    for p in doc.text_paragraphs():
+        role = p["role"]["role"]
+        text = p.get("text") or ""
+        m = p.get("list_marker")
+        marker = m["marker"] if m else detect_bullet(p)
+        an = p.get("auto_numbering") or {}
+        auto = not marker and an.get("type") in ("OUTLINE", "NUMBER", "BULLET")
+        if not marker and not auto:
+            continue
+        if role in STRUCTURAL_SKIP_ROLES:
+            skipped.append((p, STRUCTURAL_SKIP_ROLES[role]))
+            continue
+        pf = p.get("para_format") or {}
+
+        # (1) 번호·기호 뒤 공백 한 칸 - 텍스트 문제이므로 자동 수정하지 않음
+        if marker:
+            s = text.lstrip()
+            leading = len(text) - len(s)
+            if s.startswith(marker):
+                rest = s[len(marker):]
+                ws = rest[: len(rest) - len(rest.lstrip(" \t　  "))]
+                desc = "없음" if not ws else " + ".join(WS_NAMES.get(c, "U+%04X" % ord(c)) for c in ws)
+                current = {"value": ws, "display": "'%s' 뒤 %s" % (marker, desc), "source": "문단 텍스트"}
+                expected = {"value": " ", "display": "번호·기호 뒤 공백 한 칸", "basis": rc["spec_text"]}
+                obs = "번호·기호 앞에 공백 %d칸(공백으로 들여쓴 것으로 보임)" % leading if leading else None
+                ok = ws == " "
+                results.append(make_result(
+                    doc, "HANGING_INDENT", PASS if ok else FAIL,
+                    "번호·기호 뒤 %s" % ("공백 한 칸" if ok else desc + " (표준: 공백 한 칸)"),
+                    target_of(p), role_of(p), current, expected, observation=obs, fix_mode="manual_review",
+                    recommendation=None if ok else "글자·공백을 추가·삭제하지 않는 원칙상 자동 수정 대상 아님. 작성자가 번호·기호 뒤 공백을 한 칸으로 정리",
+                    extra={"sub_item": "번호·기호 뒤 공백"}))
+
+        # (2) 둘째 줄 정렬 - 줄 배치 캐시로 확정 가능한 경우만 판정
+        ll = p.get("line_layout")
+        sub = {"sub_item": "둘째 줄 정렬"}
+        cur_indent = {"indent_pt": pf.get("indent_pt"), "left_margin_pt": pf.get("left_margin_pt")}
+        if not trusted:
+            results.append(make_result(doc, "HANGING_INDENT", UNKNOWN, "줄 배치 정보를 신뢰할 수 없음", target_of(p), role_of(p),
+                                       unknown_reason="작성 프로그램(%s)이 한글이 아니어서 hp:linesegarray 가 실제 배치와 다를 수 있음" % (app or "미상"),
+                                       needed_info="한글로 저장한 파일 또는 렌더링 결과", extra=sub))
+            continue
+        if not ll:
+            results.append(make_result(doc, "HANGING_INDENT", UNKNOWN, "줄 배치 정보 없음", target_of(p), role_of(p),
+                                       unknown_reason="hp:linesegarray 가 없거나 이전 버전 Inspector 결과(line_layout 없음)",
+                                       needed_info="Inspector 재실행 또는 한글로 다시 저장", extra=sub))
+            continue
+        if ll["line_count"] < 2:
+            skipped.append((p, "현재 한 줄 문단(줄바꿈 없음) - 둘째 줄 정렬 검사 대상 아님"))
+            continue
+        indent = pf.get("indent_pt")
+        size = (p.get("char_format") or {}).get("size_pt")
+        prefix = text[: len(text) - len(text.lstrip())] + (marker or "")
+        if marker:
+            s2 = text.lstrip()[len(marker):]
+            prefix += s2[: len(s2) - len(s2.lstrip(" \t\u3000\u00a0\u2007"))]
+        current = {"value": {"line_count": ll["line_count"], **cur_indent},
+                   "display": "줄 %d개, 문단 들여쓰기 %spt%s" % (
+                       ll["line_count"], indent,
+                       " (내어쓰기 %gpt)" % -indent if indent is not None and indent < 0 else ""),
+                   "source": VALUE_SOURCE + " - paraPr/margin@intent, 줄 수는 " + (ll.get("source") or ""),
+                   "refs": {"para_pr_id": pf.get("para_pr_id")}, "role_label": p["role"]["label"]}
+        expected = {"value": "둘째 줄 시작 x = 첫째 줄 본문 첫 글자 x",
+                    "display": "내어쓰기 = 번호·기호와 뒤 공백(앞 공백 포함)의 너비", "basis": rc["spec_text"]}
+        if indent is None:
+            results.append(make_result(doc, "HANGING_INDENT", UNKNOWN, "문단 들여쓰기 값을 추출하지 못함",
+                                       target_of(p), role_of(p), current, expected,
+                                       unknown_reason="paraPr margin@intent 없음", needed_info="문단 모양 정의", extra=sub))
+            continue
+        if auto:
+            results.append(make_result(doc, "HANGING_INDENT", UNKNOWN, "자동 번호 문단의 번호 너비를 알 수 없음",
+                                       target_of(p), role_of(p), current, expected,
+                                       unknown_reason="번호가 본문 텍스트에 없고 자동 번호 너비·정렬 설정의 해석이 확인되지 않음",
+                                       needed_info="렌더링 결과 또는 자동 번호 너비", extra=sub))
+            continue
+        if indent >= 0:
+            # 내어쓰기가 없으면 둘째 줄은 첫째 줄 시작(번호·기호 위치) 또는 그보다 왼쪽에서 시작한다.
+            results.append(make_result(
+                doc, "HANGING_INDENT", FAIL,
+                "%d줄 문단인데 내어쓰기가 없음(들여쓰기 %gpt). 둘째 줄이 번호·기호 위치%s에서 시작해 첫째 줄 본문 첫 글자와 정렬되지 않음"
+                % (ll["line_count"], indent, "보다 왼쪽" if indent > 0 else ""),
+                target_of(p), role_of(p), current, expected,
+                fix_actions=[{"op": "set_para_hanging_indent", "para_pr_id": pf.get("para_pr_id"), "from": cur_indent, "to": None}],
+                blocked_reason="목표 내어쓰기 값(번호·기호와 뒤 공백, 앞 공백의 실제 글꼴 너비)을 계산하려면 글꼴 너비 정보가 필요",
+                recommendation="문단 모양의 내어쓰기(hh:margin intent 음수)를 번호·기호와 뒤 공백 너비만큼 설정(한글 Shift+Tab 효과). 글자·공백은 변경하지 않음",
+                observation="줄 수는 한글이 저장 시 기록한 줄 배치 캐시 기준", extra=sub))
+        else:
+            approx = " 글자 크기(%gpt) 기준 약 %.1f자 폭, 번호·기호 앞뒤 문자 %d자('%s')" % (
+                size, -indent / size, len(prefix), prefix.replace("\t", "→")) if size else ""
+            results.append(make_result(
+                doc, "HANGING_INDENT", UNKNOWN, "내어쓰기 %gpt 가 설정되어 있음" % -indent,
+                target_of(p), role_of(p), current, expected,
+                unknown_reason="내어쓰기 폭이 번호·기호와 공백의 실제 너비와 같은지는 글꼴 너비 계산 없이 확인할 수 없음",
+                needed_info="글꼴 너비 정보 또는 렌더링 결과",
+                observation=("참고:" + approx) if approx else None, extra=sub))
+    return results + skip_group(doc, "HANGING_INDENT", skipped)
 
 
 # ----------------------------------------------------------------------------
@@ -650,18 +945,6 @@ BULLET_LOOKALIKES = {
 # 혼동 문자 -> 의도로 보이는 표준 기호 (보고서 제안용, 자동 치환하지 않음)
 BULLET_SUGGEST = {"o": "ㅇ", "O": "ㅇ", "○": "ㅇ", "◦": "ㅇ", "·": "․", "ㆍ": "․", "‧": "․", "∙": "․", "•": "․",
                   "–": "-", "—": "-", "■": "□", "☐": "□"}
-# Inspector 의 기호 패턴에 없는 영문 o/O 기호를 보완 감지 (뒤에 공백이 올 때만)
-LATIN_O_BULLET = re.compile(r"^([oO])\s")
-
-
-def detect_bullet(p):
-    m = p.get("list_marker")
-    if m and m.get("type") == "bullet":
-        return m["marker"]
-    lm = LATIN_O_BULLET.match((p.get("text") or "").lstrip())
-    return lm.group(1) if lm else None
-
-
 def rule_item_bullet(doc):
     rc = doc.rule_cfg("ITEM_BULLET")
     results, skipped = [], []
@@ -796,6 +1079,7 @@ RULES = [
     ("PARA_SPACING", rule_para_spacing),
     ("ITEM_NUMBER", rule_item_number),
     ("ITEM_BULLET", rule_item_bullet),
+    ("HANGING_INDENT", rule_hanging_indent),
     ("DATE_FORMAT", rule_date_format),
     ("TIME_FORMAT", rule_time_format),
 ]

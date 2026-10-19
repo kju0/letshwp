@@ -12,7 +12,8 @@ MODE_LABEL = {"auto": "자동 수정", "auto_if_role_confirmed": "역할 확인 
               "manual_review": "수동 검토(자동 수정 안 함)", "none": "수정 계획 없음"}
 OP_LABEL = {
     "set_char_font": "글꼴 변경", "set_char_ratio": "장평 변경", "set_char_spacing": "자간 변경",
-    "set_para_line_spacing": "줄 간격 변경", "set_para_align": "정렬 변경", "set_page_size": "용지 크기 변경",
+    "set_para_line_spacing": "줄 간격 변경", "set_para_space_before": "문단 위 간격 설정",
+    "set_para_hanging_indent": "내어쓰기 설정", "set_para_align": "정렬 변경", "set_page_size": "용지 크기 변경",
 }
 
 
@@ -71,6 +72,13 @@ def render_report(res):
     w("  원본 불변    : %s" % ("확인됨" if d.get("source_unchanged") else "확인 안 됨"))
     w("  표준 기준    : %s / 설정 %s" % (res["checker"].get("spec_version"), res["checker"].get("config_path")))
     w("  검사 문단    : 전체 %d개 중 텍스트가 있는 %d개" % (d.get("paragraph_count", 0), d.get("checked_paragraph_count", 0)))
+    dt = d.get("document_type") or {}
+    w("  문서 유형    : %s (%s)" % (("TYPE " + dt["value"]) if dt.get("value") else "미지정 - TYPE A/B 특례 판단 불가", dt.get("source", "미지정")))
+    hs = d.get("hierarchy") or {}
+    if hs:
+        lv = ", ".join("%s단계 %d" % kv for kv in sorted((hs.get("items_by_level") or {}).items())) or "없음"
+        um = ", ".join("'%s' %d" % kv for kv in (hs.get("unmapped_markers") or {}).items()) or "없음"
+        w("  항목 계층    : %s / 일반 본문 %d / 계층 미정 번호·기호 %s" % (lv, hs.get("body", 0), um))
     w("")
     w("  검사 항목 수 : %d건" % s["total"])
     w("  적합(PASS)        : %d건" % s["PASS"])
@@ -102,7 +110,13 @@ def render_report(res):
         w("  현재값  : %s" % _disp(r.get("current")))
         w("  표준값  : %s" % _disp(r.get("expected")))
         w("  판단근거: %s" % r["reason"])
+        if r.get("observation"):
+            w("  참고    : %s" % r["observation"])
+        if r.get("interpretation_note"):
+            w("  해석주의: %s" % r["interpretation_note"])
         w("  수정방법: %s" % (r["fix"].get("recommendation") or "-"))
+        if r["fix"].get("blocked_reason"):
+            w("  자동수정 불가 사유: %s" % r["fix"]["blocked_reason"])
         w("  수정구분: %s" % MODE_LABEL.get(r["fix"]["mode"], r["fix"]["mode"]))
     w("")
 
@@ -187,7 +201,8 @@ def render_report(res):
     w("")
     w("  [수동 검토 대상 - 자동 수정하지 않음] %d건" % len(plan["manual_review"]))
     for m in plan["manual_review"][:40]:
-        w("   - %s | %s | 현재 %s → 표준 %s" % (m["rule_name"], location(m["target"]), m["current"], m["expected"]))
+        w("   - %s | %s | 현재 %s → 표준 %s%s" % (m["rule_name"], location(m["target"]), m["current"], m["expected"],
+                                            (" | 사유: " + m["blocked_reason"]) if m.get("blocked_reason") else ""))
     if len(plan["manual_review"]) > 40:
         w("   ... 외 %d건 (JSON 참조)" % (len(plan["manual_review"]) - 40))
     w("")

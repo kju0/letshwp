@@ -144,6 +144,22 @@ class FixtureInspectionTest(unittest.TestCase):
         self.assertTrue(p["char_format_mixed"])
         self.assertEqual(p["char_format"]["bold"], False)  # 대표값은 글자 수가 많은 보통 글씨
 
+    def test_line_layout_from_lineseg_cache(self):
+        p = para_by_text(self.result, BODY1[:10])
+        self.assertEqual(p["line_layout"]["line_count"], 2)
+        self.assertEqual(p["line_layout"]["lines"][1]["textpos"], 30)
+        self.assertIsNone(para_by_text(self.result, "Ⅰ.")["line_layout"])  # linesegarray 없는 문단
+
+    def test_hierarchy_annotation(self):
+        self.assertEqual(para_by_text(self.result, "1. 현황")["hierarchy"]["kind"], "item")
+        self.assertEqual(para_by_text(self.result, "1. 현황")["hierarchy"]["level"], 1)
+        self.assertEqual(para_by_text(self.result, "Ⅰ.")["hierarchy"]["kind"], "unmapped_item")
+        body = para_by_text(self.result, BODY1[:10])["hierarchy"]
+        self.assertEqual(body["kind"], "body")
+        self.assertEqual(body["owner_item"]["level"], 1)
+        self.assertEqual(para_by_text(self.result, "2024")["hierarchy"]["kind"], "out_of_scope")
+        self.assertEqual(self.result["hierarchy"]["items_by_level"], {"1": 1})
+
     # --- 표 ------------------------------------------------------------
     def test_table_structure_and_cell_formats(self):
         self.assertEqual(len(self.result["tables"]), 1)

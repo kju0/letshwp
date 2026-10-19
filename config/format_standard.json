@@ -1,10 +1,8 @@
 {
   "_comment": "FORMAT_SPEC.md 의 표준값을 검사기가 읽는 형태로 옮긴 설정. FORMAT_SPEC.md 를 바꾸면 이 파일도 함께 바꾼다. 값이 null 이거나 키가 없는 항목은 '표준 미정'으로 처리한다.",
-  "spec_version": "FORMAT_SPEC.md (commit 60dc184)",
-
+  "spec_version": "FORMAT_SPEC.md (2026-10-19 개정: 문단 간 간격 5장, 내어쓰기, 글꼴 기타 요소)",
   "role_confidence_min": 0.6,
   "tolerance_mm": 0.5,
-
   "rules": {
     "DOC_TITLE_BOX": {
       "name": "문서 제목 박스",
@@ -27,13 +25,20 @@
       "spec_text": "세로 방향",
       "orientation": "PORTRAIT",
       "_comment": "landscape 속성의 의미가 미확인이므로, 관측 사례(WIDELY + 세로 치수)와 일치할 때만 PASS 로 본다.",
-      "landscape_attr_observed_portrait": ["WIDELY"]
+      "landscape_attr_observed_portrait": [
+        "WIDELY"
+      ]
     },
     "PAGE_MARGIN": {
       "name": "페이지 여백",
       "spec_mode": "분석만",
       "spec_text": "20 / 20 / 20 / 10mm (방향별 순서 미확정)",
-      "values_mm_unordered": [20.0, 20.0, 20.0, 10.0]
+      "values_mm_unordered": [
+        20.0,
+        20.0,
+        20.0,
+        10.0
+      ]
     },
     "HEADER_FOOTER_MARGIN": {
       "name": "머리말·꼬리말 여백",
@@ -50,19 +55,23 @@
     "FONT": {
       "name": "글꼴",
       "spec_mode": "분석 후 수정",
-      "spec_text": "본문·그림/표 제목·참고주석: 휴먼명조. 대·중제목·표지: HY헤드라인M",
+      "spec_text": "본문·그림/표 제목·참고주석: 휴먼명조. 대·중제목·표지: HY헤드라인M. 소제목 및 기타 요소: 휴먼명조",
       "by_role": {
         "body": "휴먼명조",
         "figure_caption": "휴먼명조",
         "table_title": "휴먼명조",
         "note": "휴먼명조",
         "heading_1": "HY헤드라인M",
-        "heading_2": "HY헤드라인M"
+        "heading_2": "HY헤드라인M",
+        "heading_3": "휴먼명조",
+        "table_cell": "휴먼명조",
+        "header_footer": "휴먼명조",
+        "toc": "휴먼명조"
       },
       "undecided_roles": {
-        "heading_3": "소제목 글꼴 미확정 (FORMAT_SPEC 5. 미확정 사항)",
-        "document_title": "명세는 '표지' 글꼴만 정의. 표지가 아닌 본문 상단 문서 제목의 글꼴은 명시되지 않음"
-      }
+        "document_title": "표지 제목(HY헤드라인M)인지 기타 요소(휴먼명조)인지 판별 불가 - 표지·목차 판단 기준 미확정(FORMAT_SPEC 6)"
+      },
+      "_comment": "FORMAT_SPEC 4장 '소제목 및 기타 요소의 글꼴은 전체 다 휴면명조' 의 '휴면명조'는 '휴먼명조'의 오기로 보고 휴먼명조로 적용"
     },
     "FONT_SIZE": {
       "name": "글자 크기",
@@ -118,25 +127,56 @@
     },
     "PARA_SPACING": {
       "name": "문단 간 간격",
-      "spec_mode": "분석만",
-      "spec_text": "기본 14pt 글자 크기의 1행. 문단 요소에 따라 6~20pt의 1행 (산정 방식 미확정)"
+      "spec_mode": "분석 후 수정",
+      "spec_text": "계층별 16/15/14pt, 일반 본문 관련 6pt. 2↔3단계 14pt 예외. TYPE A/B 특례(20pt/0pt). 뒤 문단의 문단 위 간격으로 적용",
+      "level_base_pt": {
+        "1": 16,
+        "2": 15,
+        "default": 14
+      },
+      "level_2_3_exception_pt": 14,
+      "body_pt": 6,
+      "type_a_first_item_pt": 20,
+      "type_b_first_item_pt": 0,
+      "tolerance_pt": 0.05,
+      "bullet_levels": {},
+      "_bullet_levels_comment": "명세 5.1 은 번호(1. 가. 1) 가) ① ㉮)만 계층에 대응시킨다. 기호(□ ㅇ - ․)의 계층이 확정되면 예: {\"□\": 1, \"ㅇ\": 2} 처럼 지정. 비어 있으면 기호 항목은 계층 미정(판단 불가)"
     },
     "ITEM_NUMBER": {
       "name": "항목 번호",
       "spec_mode": "검사만",
       "spec_text": "1. → 가. → 1) → 가) → ① → ㉮",
-      "allowed_kinds": ["digit_dot", "hangul_dot", "digit_paren", "hangul_paren", "circled_digit", "circled_hangul"],
+      "allowed_kinds": [
+        "digit_dot",
+        "hangul_dot",
+        "digit_paren",
+        "hangul_paren",
+        "circled_digit",
+        "circled_hangul"
+      ],
       "kind_examples": {
-        "digit_dot": "1.", "hangul_dot": "가.", "digit_paren": "1)", "hangul_paren": "가)",
-        "circled_digit": "①", "circled_hangul": "㉮", "roman": "Ⅰ.", "chapter": "제1장",
-        "paren_digit": "(1)", "paren_hangul": "(가)"
+        "digit_dot": "1.",
+        "hangul_dot": "가.",
+        "digit_paren": "1)",
+        "hangul_paren": "가)",
+        "circled_digit": "①",
+        "circled_hangul": "㉮",
+        "roman": "Ⅰ.",
+        "chapter": "제1장",
+        "paren_digit": "(1)",
+        "paren_hangul": "(가)"
       }
     },
     "ITEM_BULLET": {
       "name": "항목 기호",
       "spec_mode": "검사만",
       "spec_text": "□ → ㅇ → - → ․",
-      "allowed": ["□", "ㅇ", "-", "․"]
+      "allowed": [
+        "□",
+        "ㅇ",
+        "-",
+        "․"
+      ]
     },
     "DATE_FORMAT": {
       "name": "날짜 표기",
@@ -147,6 +187,18 @@
       "name": "시간 표기",
       "spec_mode": "검사만",
       "spec_text": "24시간제, 예: 14:50"
+    },
+    "HANGING_INDENT": {
+      "name": "항목 줄바꿈 정렬(내어쓰기)",
+      "spec_mode": "분석 후 수정",
+      "spec_text": "번호·기호 뒤 공백 한 칸 후 본문 시작. 둘째 줄부터 첫째 줄 본문 첫 글자와 같은 가로 위치에서 시작",
+      "trusted_layout_applications": [
+        "Hancom Office Hangul",
+        "Hwp"
+      ],
+      "_comment": "줄 시작 위치는 한글이 저장 시 기록한 hp:linesegarray 로만 확인 가능. 작성 프로그램이 한글이 아니면 신뢰하지 않는다."
     }
-  }
+  },
+  "document_type": null,
+  "_document_type_comment": "TYPE A/B 판별 기준이 미확정(FORMAT_SPEC 6)이라 자동 판별하지 않는다. null 이면 미지정. 'A' 또는 'B' 로 지정하거나 CLI --doc-type 으로 지정한다."
 }

@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hwpx_analysis import ANALYZER_VERSION  # noqa: E402
 from hwpx_analysis.classifier import RoleClassifier, ROLE_LABELS  # noqa: E402
 from hwpx_analysis.header import HeaderInfo  # noqa: E402
+from hwpx_analysis.hierarchy import annotate_hierarchy  # noqa: E402
 from hwpx_analysis.package import HwpxPackage, sha256_of  # noqa: E402
 from hwpx_analysis.section import (  # noqa: E402
     SectionWalker, new_state, count_xml_elements, raw_text_of,
@@ -63,8 +64,12 @@ SUPPORT_MATRIX = [
     ("머리말·꼬리말·각주·미주 문단", "exact", ""),
     ("역할 분류(제목/본문/캡션/주석 등)", "heuristic", "근거·신뢰도 포함, 불확실 시 미분류"),
     ("수식·OLE·차트·양식 컨트롤 내부", "unsupported", "개체 존재와 크기만 기록"),
-    ("실제 렌더링 결과(줄바꿈 위치, 쪽 번호, 어절 분리)", "unsupported",
-     "hp:linesegarray 는 레이아웃 캐시로 신뢰하지 않음"),
+    ("항목 계층(1~6단계)과 일반 본문 소속", "derived",
+     "번호 표기(1. 가. 1) 가) ① ㉮)·자동 번호로 판단. Ⅰ. (1) □ 등은 대응 없음(unmapped)으로 표시"),
+    ("문단별 줄 수(line_layout)", "derived",
+     "hp:linesegarray(한글이 저장 시 기록한 레이아웃 캐시). horzpos 에는 들여쓰기/내어쓰기가 반영되지 않아(샘플 관찰) 줄 수만 판단에 사용"),
+    ("실제 렌더링 결과(글자별 위치, 쪽 번호, 어절 분리)", "unsupported",
+     "글꼴 너비를 계산하지 않으므로 줄 안의 글자 위치는 알 수 없음"),
     ("스타일 상속 해석", "unsupported", "OWPML 은 문단/글자에 완결된 모양을 직접 참조하므로 불필요. 스타일 이름만 보고"),
     ("마스터 페이지·바탕쪽", "unsupported", ""),
     ("변경 추적·메모 내용", "unsupported", ""),
@@ -128,6 +133,7 @@ def inspect_hwpx(path):
                                     desc["metadata"]).run()
     for t in state["tables"]:
         t["text_format_summary"] = table_text_summary(t, paragraphs)
+    hierarchy_summary = annotate_hierarchy(paragraphs)
 
     extracted_chars = Counter()
     for p in paragraphs:
@@ -187,6 +193,7 @@ def inspect_hwpx(path):
         "notes": state["notes"],
         "classification": dict(classification, role_labels=ROLE_LABELS),
         "statistics": aggregate(paragraphs, header),
+        "hierarchy": hierarchy_summary,
         "verification": verification,
         "support_matrix": [{"item": a, "level": b, "note": c} for a, b, c in SUPPORT_MATRIX],
         "warnings": warnings,

@@ -31,6 +31,8 @@ PRESERVATION_RULES = [
     "문단 순서, 표 구조(행·열·셀 병합), 그림 등 논리 구조를 변경하지 않는다.",
     "아래 actions 에 나열된 서식 속성(header.xml 의 charPr/paraPr, section 의 pagePr)만 변경한다.",
     "공유되는 charPr/paraPr 를 바꿀 때 다른 문단에 영향이 가면(clone_required) 정의를 복제해 대상 문단만 다시 참조시킨다.",
+    "간격·서식은 목표값으로 설정하고 기존값에 더하지 않는다(같은 문서를 반복 변환해도 누적되지 않음).",
+    "빈 문단은 중복 간격을 만들더라도 삭제하지 않고 보고만 한다.",
     "수정 후 Inspector 를 다시 실행해 문단 수·표 수·텍스트·표 격자 검증이 원본과 동일한지 확인하고, 실패하면 결과를 폐기한다.",
 ]
 
@@ -75,13 +77,15 @@ def load_inspection(path):
     raise CheckerError("지원하지 않는 입력 형식입니다(.json 또는 .hwpx): %s" % p)
 
 
-def check_document(inspection, config, config_path=None, input_mode="inspector_json", source_check=None):
+def check_document(inspection, config, config_path=None, input_mode="inspector_json", source_check=None, doc_type=None):
     ver = inspection.get("verification") or {}
     if not ver.get("all_ok"):
         # CLAUDE.md: 검증에 실패하면 결과를 정상 처리하지 않는다.
         raise CheckerError("Inspector 검증이 통과하지 않은 분석 결과는 검사하지 않습니다(verification.all_ok=false).")
 
-    doc = Doc(inspection, config)
+    if doc_type is not None and str(doc_type).upper() not in ("A", "B"):
+        raise CheckerError("문서 유형은 A 또는 B 만 지정할 수 있습니다: %s" % doc_type)
+    doc = Doc(inspection, config, doc_type.upper() if doc_type else None)
     results = []
     for rule_id, fn in RULES:
         for n, r in enumerate(fn(doc)):
@@ -105,6 +109,9 @@ def check_document(inspection, config, config_path=None, input_mode="inspector_j
             "source_unchanged": source_check["unchanged"] if source_check else src.get("unchanged_after_analysis"),
             "paragraph_count": len(doc.paragraphs),
             "checked_paragraph_count": len(doc.text_paragraphs()),
+            "document_type": {"value": doc.doc_type, "source": doc.doc_type_source,
+                              "note": "TYPE A/B 판별 기준 미확정 - 자동 판별하지 않음"},
+            "hierarchy": doc.hierarchy_summary,
         }),
         ("summary", summarize(results)),
         ("results", results),
@@ -113,6 +120,8 @@ def check_document(inspection, config, config_path=None, input_mode="inspector_j
             "역할(role)은 Inspector 의 규칙 기반 추정값이며, 서식값(current)은 HWPX XML 에서 추출한 실제 값이다.",
             "위치는 Inspector 문단 인덱스(#, 0부터, 표·머리말 포함 문서 순서)와 XML 경로로 표시한다. 쪽 번호는 산출하지 않는다.",
             "'분석만' 항목은 불일치가 있어도 FAIL 이 아니라 UNKNOWN(observation)으로 표시한다.",
+            "문단 간 간격은 본문 최상위 문단의 항목 계층(1~6단계)과 일반 본문 소속으로 계산하며, 뒤 문단의 문단 위 간격으로 비교한다.",
+            "내어쓰기 정렬은 한글이 저장 시 기록한 줄 배치(hp:linesegarray)로만 확인하며, 글꼴 너비가 필요한 경우 판단 불가로 둔다.",
         ]),
     ])
 
@@ -152,7 +161,8 @@ def build_fix_plan(doc, results):
             manual.append({"result_id": r["id"], "rule_id": r["rule_id"], "rule_name": r["rule_name"],
                            "target": r["target"], "current": (r.get("current") or {}).get("display"),
                            "expected": (r.get("expected") or {}).get("display"),
-                           "recommendation": r["fix"]["recommendation"]})
+                           "recommendation": r["fix"]["recommendation"],
+                           "blocked_reason": r["fix"].get("blocked_reason")})
             continue
         for a in r["fix"]["actions"]:
             ref = ("char_pr_id", a["char_pr_id"]) if "char_pr_id" in a else \
@@ -209,10 +219,10 @@ def save_report(result, out_path):
     return out
 
 
-def run(input_path, output=None, report=None, config_path=None):
+def run(input_path, output=None, report=None, config_path=None, doc_type=None):
     config, cpath = load_config(config_path)
     inspection, mode, src_check = load_inspection(input_path)
-    result = check_document(inspection, config, cpath, mode, src_check)
+    result = check_document(inspection, config, cpath, mode, src_check, doc_type)
     stem = Path(input_path).stem
     if mode == "inspector_json" and stem.endswith("-output"):
         stem = stem[: -len("-output")]
@@ -227,9 +237,11 @@ def main(argv=None):
     ap.add_argument("-o", "--output", help="검사 결과 JSON 경로 (기본: output/<이름>_check.json)")
     ap.add_argument("--report", help="TXT 보고서 경로(선택)")
     ap.add_argument("--config", help="표준값 설정 파일 (기본: config/format_standard.json)")
+    ap.add_argument("--doc-type", choices=["A", "B"],
+                    help="문서 유형(TYPE A: 첫 페이지 제목 표, TYPE B: 목차 다음 페이지 시작). 미지정 시 특례 판단 불가")
     args = ap.parse_args(argv)
     try:
-        result, out, rp = run(args.input, args.output, args.report, args.config)
+        result, out, rp = run(args.input, args.output, args.report, args.config, args.doc_type)
     except CheckerError as e:
         print("오류: %s" % e, file=sys.stderr)
         return 2

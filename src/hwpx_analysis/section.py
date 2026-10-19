@@ -11,7 +11,8 @@
         hp:pic          그림 (hc:img@binaryItemIDRef)
         hp:rect 등      도형 (hp:drawText -> hp:subList 에 글상자 문단)
         hp:container    묶음 개체
-      hp:linesegarray   레이아웃 캐시(줄 위치). 서식 분석에는 사용하지 않음
+      hp:linesegarray   레이아웃 캐시(줄 위치). 서식값 추출에는 쓰지 않고,
+                        줄 수·줄 시작 위치를 보조 정보(line_layout)로만 기록한다
 
 모든 hp:p 를 문서 순서대로 방문하며, 문단마다 어떤 컨테이너(본문/표 셀/머리말/
 각주/글상자/캡션) 안에 있는지 문맥을 기록한다. 처리 방법을 모르는 요소도
@@ -21,7 +22,7 @@
 from collections import Counter
 
 from .header import summarize_char, summarize_para
-from .units import to_mm, detect_paper
+from .units import to_mm, to_pt, detect_paper
 from .xmlutil import ln, child, children, to_int, to_bool
 
 # hp:t 혼합 내용의 인라인 요소 -> 텍스트 표현
@@ -198,8 +199,24 @@ class SectionWalker:
             "auto_numbering": self._auto_numbering(pp),
             "objects": objects,
             "controls": controls,
+            "line_layout": self._line_layout(p),
         })
         return idx
+
+    @staticmethod
+    def _line_layout(p):
+        """hp:linesegarray 의 줄 수와 줄별 시작 글자 위치(textpos)·horzpos·horzsize.
+        한글이 저장 시 기록한 레이아웃 캐시이므로 다른 프로그램으로 편집되면 실제와 다를 수 있다.
+        샘플 전수 관찰: 내어쓰기(intent<0) 문단 36개 모두 첫 줄과 둘째 줄의 horzpos·horzsize 가 같았다.
+        즉 들여쓰기/내어쓰기는 horzpos 에 반영되지 않으므로 줄 시작 위치 판단에 쓰지 않고 줄 수만 사용한다."""
+        arr = child(p, "linesegarray")
+        if arr is None:
+            return None
+        lines = [{"textpos": to_int(ls.get("textpos")),
+                  "horzpos_pt": to_pt(to_int(ls.get("horzpos"))),
+                  "horzsize_pt": to_pt(to_int(ls.get("horzsize")))}
+                 for ls in children(arr, "lineseg")]
+        return {"line_count": len(lines), "lines": lines[:50], "source": "hp:linesegarray (레이아웃 캐시)"}
 
     def _distinct_char_formats(self, cp_ids):
         """서로 다른 charPr id 라도 분석 대상 속성(글꼴/크기/장평/자간/굵게/기울임)이 같으면 하나로 본다."""
