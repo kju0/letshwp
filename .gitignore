@@ -10,3 +10,6 @@ tests/samples/
 
 # macOS 메타데이터
 .DS_Store
+
+# 테스트 모드 입력 문서(사용자 문서)
+inbox/

@@ -1,0 +1,69 @@
+# 프로젝트 맥락 (세션 간 인수인계 문서)
+
+Claude Code 는 세션을 시작할 때 이 문서를 먼저 읽는다. 개발 모드 작업이 끝나면 이 문서를 갱신한다.
+규칙의 정본은 CLAUDE.md, 서식 기준의 정본은 FORMAT_SPEC.md, 표준값은 config/format_standard.json 이다.
+
+## 1. 사용자 작업 방식
+- 사용자는 코드를 보지 않고 python 명령도 직접 실행하지 않는다. Claude Code 데스크톱 앱 또는 웹(claude.ai/code)에서 대화로만 작업한다.
+- 작업 모드는 세 가지다(자세한 절차는 CLAUDE.md "작업 모드").
+  - **개발**: 기능·버그·개선 요청 → 코드와 테스트 수정. git 반영은 하지 않는다.
+  - **원격 저장소 연결**: "push 해줘" / "pull 해줘" → Git 작업 규칙을 따른다.
+  - **테스트**: hwpx 제공 → `scripts/run_test.py` 로 저장소 코드를 실행 → 출력 파일을 그대로 전달한다.
+- AI 가 문서를 직접 수정하거나 결과를 만들어 내지 않는다. 결과는 반드시 코드를 실행해서 얻는다.
+- 원격 저장소: https://github.com/kju0/letshwp (브랜치 main)
+
+## 2. 구성 요약
+| 구성 | 파일 | 상태 |
+|---|---|---|
+| Inspector (분석) | src/inspector.py, src/hwpx_analysis/ | 완료 |
+| Checker (표준 검사) | src/checker.py, src/hwpx_check/ | 완료(검사만 수행) |
+| 테스트 실행기 | scripts/run_test.py | 완료 |
+| Formatter (실제 서식 수정) | — | 미착수. 사용자가 요청하지 않았다 |
+
+- 표준 라이브러리만 사용한다(폐쇄망).
+- 테스트: `python3 -m unittest discover -s tests`. 2026-10-21 기준 79개 통과, 실제 샘플 테스트 1개는 환경변수가 있을 때만 실행.
+
+## 3. 작업 이력
+1. **Inspector**:
+   - 서식 추출: 글꼴, 크기, 장평, 자간, 줄간격, 정렬, 문단 간격.
+   - 표를 분석하고, 문단 역할(제목/본문/캡션 등)을 근거와 신뢰도와 함께 분류한다. 불확실하면 미분류로 둔다.
+   - 통계와 JSON 출력. 원본 SHA-256 은 실행 전후로 비교한다.
+2. **Checker**:
+   - FORMAT_SPEC 기준으로 PASS / FAIL / UNKNOWN / SKIP 판정.
+   - JSON 과 TXT 보고서(①~⑤)와 수정 계획(fix_plan)을 만든다.
+   - 입력은 hwpx 또는 Inspector JSON 둘 다 받는다.
+   - 페이지 번호는 추정하지 않고 문단 번호와 XML 경로로 위치를 표시한다.
+3. **FORMAT_SPEC 갱신 반영(261019 기준)**:
+   - 계층 간격: 1단계 16pt, 2단계 15pt, 그 외 14pt, 2↔3단계 예외 14pt, 본문 6pt.
+   - 일반 본문은 직전 항목에 소속된다.
+   - TYPE A 는 20pt, TYPE B 는 0pt. `--doc-type` 을 지정했을 때만 검사한다.
+   - 내어쓰기 정렬(HANGING_INDENT) 검사를 추가했다.
+   - 기타 요소 글꼴: 1·2단계는 HY헤드라인M, 나머지는 휴먼명조.
+4. **Git 규칙과 권한 설정**: CLAUDE.md, .claude/settings.json.
+5. **Claude Code 데스크톱·웹 작업 환경**(2026-10-21):
+   - 작업 모드 규칙을 정했다.
+   - 이 문서, scripts/run_test.py, 슬래시 명령(/dev /test /push /pull)을 추가했다.
+
+## 4. 핵심 기술 판단 (근거: docs/HWPX_STRUCTURE.md)
+- charPr/paraPr ID 하나가 완전한 속성 집합이다. 스타일 상속을 계산할 필요가 없다.
+- `hp:switch` 는 이해하는 첫 case(2016/HwpUnitChar, 2016/paragraph 네임스페이스)를 쓰고, 없으면 default 를 쓴다. default 의 여백 값은 case 값의 2배로 저장된다.
+- 개요 번호(`^1.` 등)는 `hp:t` 에 없다. 이 번호는 heading/numbering 참조로 판단한다.
+- linesegarray 는 레이아웃 캐시다.
+  - horzpos 는 들여쓰기와 내어쓰기를 반영하지 않는다(실측 36개 문단 모두 그랬다).
+  - 그래서 내어쓰기는 indent 값(음수 = 내어쓰기)으로 판단하고, linesegarray 에서는 줄 수만 사용한다.
+- 목차(TOC) 항목은 번호가 있어도 계층 항목으로 보지 않는다.
+- 공유된 charPr/paraPr 를 수정하려면 복제가 필요하다. fix_plan 에서는 `clone_required` 로 표시한다.
+
+## 5. 최근 검사 기준값 (회귀 확인용)
+- samples/test1.hwpx: 총 252건 — PASS 154, FAIL 29, UNKNOWN 58, SKIP 11 (2026-10-21, 커밋 31f9d42 코드)
+- test1 의 간격 검사가 대부분 UNKNOWN 인 이유: 문서가 □ 기호를 쓰는데 □ 의 계층이 정해지지 않았다(아래 6번).
+
+## 6. 미결정 사항 (사용자 결정 필요)
+- [ ] □ / ㅇ / - / ․ 기호, 그리고 Ⅰ. / (1) / (가) 표기의 계층 대응. 결정되면 config 의 `PARA_SPACING.bullet_levels` 에 설정한다.
+- [ ] FORMAT_SPEC 의 "휴면명조"는 "휴먼명조"의 오타로 보인다. 현재 코드는 "휴먼명조"로 처리한다.
+- [ ] FORMAT_SPEC 5.10 의 복귀 간격(하위 계층 → 상위 계층) 해석.
+- [ ] TYPE A/B 를 자동으로 판정할 기준. 현재는 사용자가 `--doc-type` 으로 지정해야 한다.
+
+## 7. 다음 후보 작업
+- Formatter: 검사 결과의 fix_plan 을 바탕으로 복제본의 서식만 수정하고, 수정 후 다시 검증한다. 사용자가 요청하면 착수한다.
+- Mattermost 봇 연동, 웹 UI: 추후.

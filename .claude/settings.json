@@ -8,7 +8,11 @@
       "Bash(git fetch:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push origin main)"
+      "Bash(git push origin main)",
+      "Bash(python3 scripts/run_test.py:*)",
+      "Bash(python3 -m unittest:*)",
+      "Bash(python3 src/inspector.py:*)",
+      "Bash(python3 src/checker.py:*)"
     ],
     "deny": [
       "Bash(git push --force:*)",

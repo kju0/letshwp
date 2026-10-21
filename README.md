@@ -9,8 +9,27 @@
 config/format_standard.json   표준값 설정 (FORMAT_SPEC.md 를 검사기가 읽는 형태로 옮긴 것)
 src/inspector.py              분석기 CLI        src/hwpx_analysis/  분석 모듈
 src/checker.py                검사기 CLI        src/hwpx_check/     검사 규칙·보고서
+scripts/run_test.py           테스트 모드 실행기(Inspector → Checker → 결과 폴더)
 tests/                        자동 테스트 (python3 -m unittest discover -s tests -v)
 ```
+
+---
+
+## 0. Claude Code 에서 사용하기 (코드·명령어 없이 대화로 작업)
+
+사용자는 Claude Code 데스크톱 앱 또는 웹에서 아래 세 가지를 요청한다. 규칙은 CLAUDE.md "작업 모드", 지금까지의 맥락은 [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md) 에 있다.
+
+| 모드 | 이렇게 말하기 | 하는 일 |
+|---|---|---|
+| 개발 | "개발: ○○ 기능 추가해줘" 또는 `/dev ○○` | 코드·테스트 수정, 테스트 실행 (git 반영 없음) |
+| 원격 저장소 연결 | "push 해줘" / "pull 해줘" 또는 `/push`, `/pull` | 테스트 → 커밋 → GitHub push / 최신 코드 가져오기 |
+| 테스트 | hwpx 첨부(또는 경로) + "테스트해줘" 또는 `/test 파일` | 저장소 코드로 Inspector → Checker 실행, 출력 파일 전달 |
+
+테스트 결과는 `output/<파일명>_<시각>/` 에 저장된다: `check_report.txt`(검사 보고서), `check.json`, `inspection_report.txt`, `inspection.json`, `run_info.json`(원본 무변경 확인, 실행한 코드 커밋), `source.hwpx`(원본 복사본).
+결과는 항상 코드를 실행해서 얻으며, AI 가 문서를 직접 고치지 않는다.
+
+- **데스크톱 앱**: Code 탭 → 폴더 `/Users/joo0/Desktop/dev/letshwp` 선택 → 대화 시작. 로컬 파일을 그대로 쓰므로 hwpx 첨부·경로 지정과 main push 가 모두 가능하다.
+- **웹 (claude.ai/code)**: GitHub 저장소 `kju0/letshwp` 를 연결해 세션을 연다. 클라우드에 저장소를 복제해 실행하므로 **push 된 코드·규칙만** 보인다. 웹 세션은 보통 작업 브랜치를 만들어 push 하며(main 반영은 PR 병합), 결과 파일은 클라우드 환경에 생기므로 대화로 전달받는다. hwpx 첨부가 안 되면 데스크톱을 사용한다.
 
 ---
 
