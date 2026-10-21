@@ -7,3 +7,6 @@ tests/output/
 
 # 실제 샘플 문서는 저장소에 넣지 않는다
 tests/samples/
+
+# macOS 메타데이터
+.DS_Store
