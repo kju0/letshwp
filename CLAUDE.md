@@ -37,3 +37,14 @@ HWPX 문서의 내용과 논리적 구조를 유지하면서
 ## 현재 개발 범위
 - HWPX 편집 엔진 우선 개발
 - Mattermost와 웹 UI 연동은 추후 개발
+
+## Git 작업 규칙
+- 사용자가 요청할 때만 pull / commit / push 한다. 임의로 하지 않는다.
+- "pull 해줘": git status 확인 → 로컬 변경이 있으면 알리고 진행 여부 확인 → `git pull --rebase origin main` → 결과 요약.
+- "push 해줘": git status/diff 로 변경 확인 → 테스트 실행(`python3 -m unittest discover -s tests`)
+  → 실패 시 push 를 중단하고 보고 → 변경을 논리 단위로 나눠 커밋 → `git push origin main` → 커밋 목록 보고.
+- 커밋 메시지: `<유형> : <한국어 짧은 요약>` (유형: add / fix / update / conf / docs / test / refactor).
+  본문에는 변경 파일별 한 줄 요약을 bullet 로 적는다.
+- 커밋 제외: output/, tests/output/, .DS_Store, 사용자가 지정한 개인 문서.
+- force push, 히스토리 재작성(reset --hard, rebase -i, 푸시된 커밋 amend)은 하지 않는다.
+- 충돌이 나면 자동 해결하지 않고 충돌 파일을 보고한다.
