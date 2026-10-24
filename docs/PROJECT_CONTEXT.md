@@ -5,10 +5,11 @@ Claude Code 는 세션을 시작할 때 이 문서를 먼저 읽는다. 개발 �
 
 ## 1. 사용자 작업 방식
 - 사용자는 코드를 보지 않고 python 명령도 직접 실행하지 않는다. Claude Code 데스크톱 앱 또는 웹(claude.ai/code)에서 대화로만 작업한다.
-- 작업 모드는 세 가지다(자세한 절차는 CLAUDE.md "작업 모드").
+- 작업 모드는 네 가지다(자세한 절차는 CLAUDE.md "작업 모드").
   - **개발**: 기능·버그·개선 요청 → 코드와 테스트 수정. git 반영은 하지 않는다.
   - **원격 저장소 연결**: "push 해줘" / "pull 해줘" → Git 작업 규칙을 따른다.
   - **테스트**: hwpx 제공 → `scripts/run_test.py` 로 저장소 코드를 실행 → 출력 파일을 그대로 전달한다.
+  - **수정**: hwpx 제공 + "수정해줘" → `scripts/run_fix.py` 실행 → 수정본 hwpx 와 change_report.md 를 전달한다.
 - AI 가 문서를 직접 수정하거나 결과를 만들어 내지 않는다. 결과는 반드시 코드를 실행해서 얻는다.
 - 원격 저장소: https://github.com/kju0/letshwp (브랜치 main)
 
@@ -18,10 +19,11 @@ Claude Code 는 세션을 시작할 때 이 문서를 먼저 읽는다. 개발 �
 | Inspector (분석) | src/inspector.py, src/hwpx_analysis/ | 완료 |
 | Checker (표준 검사) | src/checker.py, src/hwpx_check/ | 완료(검사만 수행) |
 | 테스트 실행기 | scripts/run_test.py | 완료 |
-| Formatter (실제 서식 수정) | — | 미착수. 사용자가 요청하지 않았다 |
+| Formatter (실제 서식 수정·검증) | src/formatter.py, src/hwpx_format/ | 완료(2026-10-25). 한글 프로그램에서 연 화면 확인은 미실시 |
+| 수정 모드 실행기 | scripts/run_fix.py | 완료 |
 
 - 표준 라이브러리만 사용한다(폐쇄망).
-- 테스트: `python3 -m unittest discover -s tests`. 2026-10-21 기준 79개 통과, 실제 샘플 테스트 1개는 환경변수가 있을 때만 실행.
+- 테스트: `python3 -m unittest discover -s tests`. 2026-10-25 기준 98개 통과(Formatter 19개 추가), 실제 샘플 테스트 1개는 환경변수가 있을 때만 실행.
 
 ## 3. 작업 이력
 1. **Inspector**:
@@ -44,6 +46,16 @@ Claude Code 는 세션을 시작할 때 이 문서를 먼저 읽는다. 개발 �
    - 작업 모드 규칙을 정했다.
    - 이 문서, scripts/run_test.py, 슬래시 명령(/dev /test /push /pull)을 추가했다.
 
+6. **Formatter**(2026-10-25):
+   - fix_plan 의 auto_actions + role_based_actions 를 적용한다. manual_review(날짜·기호 등 글자 변경)와 UNKNOWN/SKIP 은 적용하지 않는다.
+   - 지원 동작: 자간, 장평, 글꼴(등록된 글꼴만), 줄 간격, 문단 위 간격, 정렬, 용지 크기. 동작별 독립 함수(src/hwpx_format/ops.py).
+   - 기존 charPr/paraPr 는 고치지 않고, 대상 문단이 쓰는 정의를 복제(새 id)해 대상 문단·run 만 재참조한다.
+   - XML 은 expat 바이트 위치로 속성값만 바꾼다(재직렬화하지 않음). ZIP 엔트리 순서·압축 방식 유지.
+   - 수정 후 Inspector·Checker 를 다시 돌려 9개 항목을 검증하고, 실패하면 수정본을 지운다(종료 코드 2).
+   - 결과: `<파일명>_수정본.hwpx`, change_report.md(마크다운 수정 보고서), fix_result.json, 수정 전후 검사 보고서.
+   - 같은 문서를 두 번 수정해도 두 번째에는 바뀌는 것이 없다(멱등성 확인).
+   - CLAUDE.md 에 "4) 수정 모드", 슬래시 명령 /fix 를 추가했다.
+
 ## 4. 핵심 기술 판단 (근거: docs/HWPX_STRUCTURE.md)
 - charPr/paraPr ID 하나가 완전한 속성 집합이다. 스타일 상속을 계산할 필요가 없다.
 - `hp:switch` 는 이해하는 첫 case(2016/HwpUnitChar, 2016/paragraph 네임스페이스)를 쓰고, 없으면 default 를 쓴다. default 의 여백 값은 case 값의 2배로 저장된다.
@@ -53,9 +65,14 @@ Claude Code 는 세션을 시작할 때 이 문서를 먼저 읽는다. 개발 �
   - 그래서 내어쓰기는 indent 값(음수 = 내어쓰기)으로 판단하고, linesegarray 에서는 줄 수만 사용한다.
 - 목차(TOC) 항목은 번호가 있어도 계층 항목으로 보지 않는다.
 - 공유된 charPr/paraPr 를 수정하려면 복제가 필요하다. fix_plan 에서는 `clone_required` 로 표시한다.
+  Formatter 는 공유 여부와 관계없이 항상 복제한다(스타일 등 문단 외 참조까지 보호하기 위해).
+- 용지 A4 는 한글 저장값 59528×84188 HWPUNIT 을 쓴다(mm 환산 반올림 84189 와 1 차이).
 
 ## 5. 최근 검사 기준값 (회귀 확인용)
 - samples/test1.hwpx: 총 252건 — PASS 154, FAIL 29, UNKNOWN 58, SKIP 11 (2026-10-21, 커밋 31f9d42 코드)
+  - 수정 후(2026-10-25): PASS 178, FAIL 5(날짜 4·기호 1, 수동 검토), 서식 정의 26개 복제, 검증 9개 모두 통과
+- samples/test3.hwpx 수정: FAIL 35 → 6, PASS 167 → 196, 검증 통과
+- inbox 의 입찰공고(OA서비스데스크…).hwpx 는 test1 과 같은 문서(검사·수정 결과 동일)
 - test1 의 간격 검사가 대부분 UNKNOWN 인 이유: 문서가 □ 기호를 쓰는데 □ 의 계층이 정해지지 않았다(아래 6번).
 
 ## 6. 미결정 사항 (사용자 결정 필요)
@@ -63,7 +80,10 @@ Claude Code 는 세션을 시작할 때 이 문서를 먼저 읽는다. 개발 �
 - [ ] FORMAT_SPEC 의 "휴면명조"는 "휴먼명조"의 오타로 보인다. 현재 코드는 "휴먼명조"로 처리한다.
 - [ ] FORMAT_SPEC 5.10 의 복귀 간격(하위 계층 → 상위 계층) 해석.
 - [ ] TYPE A/B 를 자동으로 판정할 기준. 현재는 사용자가 `--doc-type` 으로 지정해야 한다.
+- [ ] 수정본을 한글 프로그램에서 열어 정상 표시·줄 배치 재계산 여부 확인(개발 환경에 한글 없음). 문제 있으면 linesegarray 처리 검토.
+- [ ] 자간·장평의 한자·일본어 등 나머지 언어 슬롯도 0%/100% 로 맞출지(현재는 한글·영문만).
+- [ ] 미등록 글꼴(문서 글꼴 목록에 없는 휴먼명조/HY헤드라인M)을 목록에 추가해 적용할지(현재는 미적용 보고).
 
 ## 7. 다음 후보 작업
-- Formatter: 검사 결과의 fix_plan 을 바탕으로 복제본의 서식만 수정하고, 수정 후 다시 검증한다. 사용자가 요청하면 착수한다.
+- Formatter 보강: 위 미결정 사항이 정해지면 반영. 내어쓰기 자동 수정(글꼴 너비 정보 필요).
 - Mattermost 봇 연동, 웹 UI: 추후.

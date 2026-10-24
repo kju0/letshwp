@@ -1,7 +1,7 @@
 # letshwp
 렛츠한글 — HWPX 문서의 내용과 구조는 그대로 두고 서식만 표준에 맞추는 도구.
 
-현재 구성: **Inspector(분석)** → **Checker(표준 검사)** → Formatter(서식 수정, 개발 예정)
+현재 구성: **Inspector(분석)** → **Checker(표준 검사)** → **Formatter(서식 수정·검증)**
 
 표준 라이브러리만 사용한다(Python 3.10+). 외부 패키지·네트워크 없이 폐쇄망에서 실행된다.
 
@@ -9,7 +9,9 @@
 config/format_standard.json   표준값 설정 (FORMAT_SPEC.md 를 검사기가 읽는 형태로 옮긴 것)
 src/inspector.py              분석기 CLI        src/hwpx_analysis/  분석 모듈
 src/checker.py                검사기 CLI        src/hwpx_check/     검사 규칙·보고서
+src/formatter.py              수정기 CLI        src/hwpx_format/    수정 동작·검증·마크다운 보고서
 scripts/run_test.py           테스트 모드 실행기(Inspector → Checker → 결과 폴더)
+scripts/run_fix.py            수정 모드 실행기(검사 → 수정 → 재검사·검증 → 결과 폴더)
 tests/                        자동 테스트 (python3 -m unittest discover -s tests -v)
 ```
 
@@ -17,15 +19,17 @@ tests/                        자동 테스트 (python3 -m unittest discover -s 
 
 ## 0. Claude Code 에서 사용하기 (코드·명령어 없이 대화로 작업)
 
-사용자는 Claude Code 데스크톱 앱 또는 웹에서 아래 세 가지를 요청한다. 규칙은 CLAUDE.md "작업 모드", 지금까지의 맥락은 [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md) 에 있다.
+사용자는 Claude Code 데스크톱 앱 또는 웹에서 아래 네 가지를 요청한다. 규칙은 CLAUDE.md "작업 모드", 지금까지의 맥락은 [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md) 에 있다.
 
 | 모드 | 이렇게 말하기 | 하는 일 |
 |---|---|---|
 | 개발 | "개발: ○○ 기능 추가해줘" 또는 `/dev ○○` | 코드·테스트 수정, 테스트 실행 (git 반영 없음) |
 | 원격 저장소 연결 | "push 해줘" / "pull 해줘" 또는 `/push`, `/pull` | 테스트 → 커밋 → GitHub push / 최신 코드 가져오기 |
 | 테스트 | hwpx 첨부(또는 경로) + "테스트해줘" 또는 `/test 파일` | 저장소 코드로 Inspector → Checker 실행, 출력 파일 전달 |
+| 수정 | hwpx 첨부(또는 경로) + "수정해줘" 또는 `/fix 파일` | 검사 → 서식 수정 → 재검사·검증, 수정본 hwpx 와 마크다운 수정 보고서 전달 |
 
 테스트 결과는 `output/<파일명>_<시각>/` 에 저장된다: `check_report.txt`(검사 보고서), `check.json`, `inspection_report.txt`, `inspection.json`, `run_info.json`(원본 무변경 확인, 실행한 코드 커밋), `source.hwpx`(원본 복사본).
+수정 결과는 `output/<파일명>_<시각>_수정/` 에 저장된다: `<파일명>_수정본.hwpx`, `change_report.md`(수정 내역), `fix_result.json`, `check_before*`/`check_after*`(수정 전후 검사), `run_info.json`, `source.hwpx`.
 결과는 항상 코드를 실행해서 얻으며, AI 가 문서를 직접 고치지 않는다.
 
 - **데스크톱 앱**: Code 탭 → 폴더 `/Users/joo0/Desktop/dev/letshwp` 선택 → 대화 시작. 로컬 파일을 그대로 쓰므로 hwpx 첨부·경로 지정과 main push 가 모두 가능하다.
@@ -195,9 +199,53 @@ python3 src/checker.py   output/test1-output.json -o output/test1_check.json --r
 
 ---
 
-## 3. 테스트
+## 3. Formatter (서식 수정기)
+
+Checker 의 수정 계획(fix_plan) 중 **자동 수정**(`auto_actions`)과 **역할이 확인된 분석 후 수정**(`role_based_actions`)을
+HWPX 복제본에 적용하고, 수정본을 다시 분석·검사해 검증한다. 검증에 실패하면 수정본을 만들지 않는다.
 
 ```
-python3 -m unittest discover -s tests -v                       # Inspector + Checker + 신규 규칙(test_spacing_rules) 전체
+python3 scripts/run_fix.py samples/문서.hwpx [--doc-type A|B]          # 결과 폴더까지 한 번에
+python3 src/formatter.py samples/문서.hwpx --out-dir output/문서_fix    # 수정기만
+```
+
+### 지원하는 수정 동작 (src/hwpx_format/ops.py)
+
+| 동작 | 바꾸는 XML | 비고 |
+|---|---|---|
+| 자간 / 장평 | `hh:charPr/hh:spacing`, `hh:ratio` 의 수정 계획에 적힌 언어 슬롯(한글·영문) | |
+| 글꼴 | `hh:charPr/hh:fontRef@hangul` | 문서에 등록된 글꼴일 때만. 미등록이면 적용하지 않고 보고 |
+| 줄 간격 | `hh:paraPr` 안 모든 `hh:lineSpacing`(switch case·default) | |
+| 문단 위 간격 | `hh:paraPr` 안 `hc:prev` — case 는 pt×100, default 는 그 2배 | 목표값 설정, 누적 없음 |
+| 정렬 | `hh:paraPr/hh:align@horizontal` | |
+| 용지 크기 | `hp:secPr/hp:pagePr@width,height` (A4 = 59528×84188) | 가로/세로 방향은 유지 |
+
+동작을 추가·제거하려면 `ops.py` 의 함수와 `DEF_OPS`/`SECTION_OPS` 항목만 바꾼다.
+
+### 수정 방식
+- 기존 `charPr`/`paraPr` 정의는 고치지 않는다. 대상 문단이 쓰는 정의를 **복제해 새 id 로 추가**하고, 대상 문단(또는 그 run)만 새 id 를 참조시킨다.
+  같은 정의라도 적용할 동작 묶음이 다르면 묶음별로 따로 복제한다. 그래서 대상이 아닌 문단·스타일의 서식은 바뀌지 않는다.
+- XML 은 바이트 단위로 해당 속성값만 바꾼다(네임스페이스 접두어·따옴표·선언문 등 나머지 바이트 그대로). ZIP 엔트리 순서·압축 방식도 원본과 같다.
+
+### 검증 (하나라도 실패하면 수정본 폐기, 종료 코드 2)
+패키지 엔트리·순서·압축 동일 / 바꾼 파트(header·section) 외 바이트 동일 / mimetype 첫 엔트리 무압축 / 수정본 Inspector 검증 통과 /
+문단 수·순서·텍스트·개체 동일 / 표 구조·셀 병합·그림 동일 / 대상 아닌 문단의 서식 변화 없음 / 적용한 항목이 재검사에서 PASS / PASS 였던 항목의 FAIL 회귀 없음.
+
+### 수정하지 않는 것
+- 검사만 항목(날짜·시간·번호·기호·제목 박스): 글자를 바꿔야 하므로 보고만 한다.
+- 판단 불가(UNKNOWN)·검사 제외(SKIP)·분석만 항목, 내어쓰기(목표 폭 계산 불가).
+
+### 알려진 제한사항
+- 줄 배치 캐시(`hp:linesegarray`)는 원본 값 그대로 둔다. 자간·줄 간격·문단 간격이 바뀌면 실제 줄·쪽 나눔이 달라질 수 있으므로 한글에서 열어 확인해야 한다.
+- 개발 환경에 한글 프로그램이 없어, 수정본을 한글에서 연 화면 확인은 아직 하지 못했다(구조·재검사 검증만 수행).
+- 자간·장평은 수정 계획에 적힌 언어 슬롯(한글·영문)만 바꾼다. 한자·일본어 등 나머지 슬롯은 명세 기준이 없어 그대로 둔다.
+- 미리보기(`Preview/PrvImage.png`)는 갱신하지 않는다.
+
+---
+
+## 4. 테스트
+
+```
+python3 -m unittest discover -s tests -v                       # Inspector + Checker + Formatter 전체
 HWPX_SAMPLE_DIR=samples python3 -m unittest tests.test_inspector   # 실제 샘플 포함
 ```
