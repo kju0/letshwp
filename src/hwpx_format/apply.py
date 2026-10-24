@@ -1,0 +1,250 @@
+"""fix_plan 의 수정 동작을 HWPX 복제본에 적용한다.
+
+원칙
+- 기존 charPr/paraPr 정의는 고치지 않는다. 수정 대상 문단이 쓰는 정의를 복제해 새 id 로 추가하고,
+  대상 문단(또는 그 문단의 run)만 새 id 를 참조하게 바꾼다. 그래서 대상이 아닌 문단·스타일의 서식은 그대로다.
+- 같은 정의를 쓰는 대상 문단이라도 적용할 op 묶음이 다르면 묶음별로 따로 복제한다.
+- 구역 설정(용지 크기)은 해당 구역의 hp:pagePr 값을 직접 바꾼다.
+- XML 은 바이트 단위로 필요한 속성만 바꾼다(xmlpatch). 텍스트·문단·표·그림 요소는 건드리지 않는다.
+"""
+
+import zipfile
+from collections import OrderedDict, defaultdict
+
+from hwpx_analysis.header import HeaderInfo
+from hwpx_analysis.package import HwpxPackage
+from hwpx_analysis.section import SectionWalker, new_state
+from hwpx_analysis.xmlutil import ln
+
+from .ops import DEF_OPS, SECTION_OPS, OpNotApplicable
+from .xmlpatch import scan, set_attr_edit, apply_edits, XmlPatchError
+
+REF_ATTR = {"charPr": "charPrIDRef", "paraPr": "paraPrIDRef"}
+CONTAINER = {"charPr": "charProperties", "paraPr": "paraProperties"}
+ID_KEY = {"charPr": "char_pr_id", "paraPr": "para_pr_id"}
+
+
+class ApplyError(RuntimeError):
+    pass
+
+
+def select_actions(check):
+    """적용 대상: '자동 수정'(auto_actions) + 역할이 확인된 '분석 후 수정'(role_based_actions)."""
+    fp = check.get("fix_plan") or {}
+    out = []
+    for group in ("auto_actions", "role_based_actions"):
+        for a in fp.get(group) or []:
+            out.append(dict(a, plan_group=group))
+    return out
+
+
+def _paragraph_elements(path):
+    """Inspector 와 같은 방문 규칙으로 '문단 경로 -> 구역 내 hp:p 순번' 을 만든다."""
+    out = []
+    with HwpxPackage(path) as pkg:
+        desc = pkg.describe()
+        header = HeaderInfo(pkg.read_xml(desc["header_part"]))
+        state = new_state()
+        for i, part in enumerate(desc["section_parts"]):
+            root = pkg.read_xml(part)
+            found = {}
+
+            class Recorder(SectionWalker):
+                def visit_paragraph(self, p, ctx):
+                    found[ctx["path"]] = p
+                    return super().visit_paragraph(p, ctx)
+
+            Recorder(header, desc["binary_items"], i, state).walk(root)
+            order = {id(e): n for n, e in enumerate(e for e in root.iter() if ln(e.tag) == "p")}
+            out.append((part, {path: order[id(el)] for path, el in found.items()}))
+        return desc["header_part"], out
+
+
+def _read_zip(path):
+    with zipfile.ZipFile(path) as z:
+        infos = z.infolist()
+        return infos, {i.filename: z.read(i.filename) for i in infos}
+
+
+def write_zip(out_path, infos, data):
+    """원본과 같은 엔트리 순서·압축 방식으로 쓴다(mimetype 은 첫 엔트리, 무압축 유지)."""
+    with zipfile.ZipFile(out_path, "w") as z:
+        for info in infos:
+            zi = zipfile.ZipInfo(info.filename, date_time=info.date_time)
+            zi.compress_type = info.compress_type
+            zi.external_attr = info.external_attr
+            zi.create_system = info.create_system
+            zi.comment = info.comment
+            zi.extra = info.extra
+            z.writestr(zi, data[info.filename])
+
+
+def _def_index(header_bytes):
+    root, _ = scan(header_bytes)
+    defs = {"charPr": {}, "paraPr": {}}
+    containers = {}
+    for kind, cont in CONTAINER.items():
+        conts = list(root.iter(cont))
+        if len(conts) != 1:
+            raise ApplyError("header.xml 의 hh:%s 가 %d개(1개여야 함)" % (cont, len(conts)))
+        containers[kind] = conts[0]
+        for el in conts[0].kids(kind):
+            defs[kind][int(el.attrs["id"])] = el
+    return root, defs, containers
+
+
+def _run_def_op(header_bytes, def_el, action):
+    """정의 조각에 op 하나를 적용해 본다. 반환: (조각 바이트, 편집 목록)"""
+    frag = header_bytes[def_el.start:def_el.end]
+    froot, _ = scan(frag)
+    _, fn = DEF_OPS[action["op"]]
+    return frag, froot, fn(frag, froot, action)
+
+
+def apply_fix_plan(src_path, out_path, inspection, check):
+    actions = select_actions(check)
+    paragraphs = inspection["paragraphs"]
+    infos, data = _read_zip(src_path)
+    header_part, sections = _paragraph_elements(src_path)
+    header_bytes = data[header_part]
+    _, defs, containers = _def_index(header_bytes)
+
+    applied, not_applied = [], []
+    # 1) 각 op 를 원래 정의에 시험 적용해 적용 가능 여부를 먼저 가린다
+    def_actions, sec_actions = [], []
+    for n, a in enumerate(actions):
+        a = dict(a, action_no=n + 1)
+        op = a["op"]
+        try:
+            if op in DEF_OPS:
+                kind = DEF_OPS[op][0]
+                did = a.get(ID_KEY[kind])
+                if did not in defs[kind]:
+                    raise OpNotApplicable("header.xml 에 hh:%s id=%s 정의가 없음" % (kind, did))
+                if not a.get("paragraphs"):
+                    raise OpNotApplicable("대상 문단이 지정되지 않음")
+                _run_def_op(header_bytes, defs[kind][did], a)
+                def_actions.append((kind, did, a))
+            elif op in SECTION_OPS:
+                sec_actions.append(a)
+            else:
+                raise OpNotApplicable("지원하지 않는 수정 동작: %s" % op)
+        except (OpNotApplicable, XmlPatchError) as e:
+            not_applied.append(dict(a, reason=str(e)))
+
+    # 2) 정의별로 대상 문단을 '적용할 op 묶음' 이 같은 것끼리 나눈다
+    per_para = defaultdict(list)  # (kind, def_id, paragraph) -> [action]
+    for kind, did, a in def_actions:
+        for pi in a["paragraphs"]:
+            per_para[(kind, did, pi)].append(a)
+    groups = OrderedDict()  # (kind, def_id, op 묶음) -> [paragraph]
+    for (kind, did, pi), acts in sorted(per_para.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2])):
+        key = (kind, did, tuple(sorted(x["action_no"] for x in acts)))
+        groups.setdefault(key, []).append(pi)
+
+    by_no = {a["action_no"]: a for _, _, a in def_actions}
+    next_id = {k: (max(v) + 1 if v else 0) for k, v in defs.items()}
+    new_defs = {"charPr": [], "paraPr": []}
+    clones = []
+    retarget = defaultdict(list)  # paragraph -> [(kind, old, new)]
+    for (kind, did, nos), paras in groups.items():
+        frag_edits = []
+        frag, froot, _ = _run_def_op(header_bytes, defs[kind][did], by_no[nos[0]])
+        for no in nos:
+            _, _, edits = _run_def_op(header_bytes, defs[kind][did], by_no[no])
+            frag_edits.extend(edits)
+        new_id = next_id[kind]
+        next_id[kind] += 1
+        frag_edits.append(set_attr_edit(frag, froot, "id", new_id))
+        new_defs[kind].append(apply_edits(frag, _dedupe(frag_edits)))
+        clones.append({"kind": kind, "from_id": did, "new_id": new_id, "paragraphs": paras,
+                       "action_nos": list(nos), "ops": sorted({by_no[n]["op"] for n in nos})})
+        for pi in paras:
+            retarget[pi].append((kind, did, new_id))
+
+    # 3) header.xml: 복제 정의를 각 목록 끝에 추가하고 itemCnt 갱신
+    h_edits = []
+    for kind, blobs in new_defs.items():
+        if not blobs:
+            continue
+        cont = containers[kind]
+        close_at = header_bytes.rfind(b"</", cont.start, cont.end)
+        h_edits.append((close_at, close_at, b"".join(blobs)))
+        if "itemCnt" in cont.attrs:
+            h_edits.append(set_attr_edit(header_bytes, cont, "itemCnt", int(cont.attrs["itemCnt"]) + len(blobs)))
+    new_data = dict(data)
+    if h_edits:
+        new_data[header_part] = apply_edits(header_bytes, h_edits)
+
+    # 4) section*.xml: 대상 문단의 참조 바꾸기 + 구역 op
+    sec_edit_lists = defaultdict(list)
+    sec_scans = {}
+
+    def sec_scan(si):
+        if si not in sec_scans:
+            part = sections[si][0]
+            root, order = scan(data[part])
+            sec_scans[si] = (part, root, [e for e in order if e.local == "p"])
+        return sec_scans[si]
+
+    for pi, items in sorted(retarget.items()):
+        para = paragraphs[pi]
+        si = para["section"]
+        part, _, p_elems = sec_scan(si)
+        ordinal = sections[si][1].get(para["path"])
+        if ordinal is None or ordinal >= len(p_elems):
+            raise ApplyError("문단 #%d(%s) 의 XML 위치를 찾지 못함" % (pi, para["path"]))
+        p_el = p_elems[ordinal]
+        sec_bytes = data[part]
+        for kind, old, new in items:
+            if kind == "paraPr":
+                if p_el.attrs.get("paraPrIDRef") != str(old):
+                    raise ApplyError("문단 #%d 의 paraPrIDRef 가 %s 가 아님" % (pi, old))
+                sec_edit_lists[si].append(set_attr_edit(sec_bytes, p_el, "paraPrIDRef", new))
+            else:
+                runs = [r for r in p_el.kids("run") if r.attrs.get("charPrIDRef") == str(old)]
+                if not runs:
+                    raise ApplyError("문단 #%d 에 charPrIDRef=%s 인 run 이 없음" % (pi, old))
+                for r in runs:
+                    sec_edit_lists[si].append(set_attr_edit(sec_bytes, r, "charPrIDRef", new))
+
+    for a in sec_actions:
+        si = a.get("section_index")
+        try:
+            if si is None or si >= len(sections):
+                raise OpNotApplicable("구역 %s 이 없음" % si)
+            part, root, _ = sec_scan(si)
+            page_prs = [e for e in root.iter("pagePr") if e.has_ancestor("secPr")]
+            if not page_prs:
+                raise OpNotApplicable("구역 %d 에 hp:secPr/hp:pagePr 가 없음" % si)
+            sec_edit_lists[si].extend(SECTION_OPS[a["op"]](data[part], page_prs[0], a))
+            applied.append(dict(a))
+        except (OpNotApplicable, XmlPatchError) as e:
+            not_applied.append(dict(a, reason=str(e)))
+
+    for si, edits in sec_edit_lists.items():
+        part = sections[si][0]
+        new_data[part] = apply_edits(data[part], _dedupe(edits))
+
+    applied_nos = {n for c in clones for n in c["action_nos"]}
+    applied.extend(by_no[n] for n in sorted(applied_nos))
+    applied.sort(key=lambda a: a["action_no"])
+
+    write_zip(out_path, infos, new_data)
+    return OrderedDict([
+        ("selected_action_count", len(actions)),
+        ("applied", applied),
+        ("not_applied", not_applied),
+        ("clones", clones),
+        ("changed_parts", sorted(k for k in new_data if new_data[k] != data[k])),
+    ])
+
+
+def _dedupe(edits):
+    """같은 위치를 같은 값으로 바꾸는 편집은 하나로 합친다. 같은 위치에 다른 값이면 충돌."""
+    seen = {}
+    for s, e, b in edits:
+        if (s, e) in seen and seen[(s, e)] != b:
+            raise ApplyError("같은 속성에 서로 다른 값을 쓰려는 수정 충돌(위치 %d)" % s)
+        seen[(s, e)] = b
+    return [(s, e, b) for (s, e), b in seen.items()]
