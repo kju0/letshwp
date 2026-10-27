@@ -73,6 +73,12 @@ class OpsTest(unittest.TestCase):
         self.assertEqual(out.count(b'<hh:lineSpacing type="PERCENT" value="160" unit="HWPUNIT"/>'), 2)
         self.assertNotIn(b'value="130"', out)
 
+    def test_hanging_indent_case_and_default_double(self):
+        out = _apply(ops.op_set_para_hanging_indent, PARA_PR, {"to": -21.0})
+        self.assertIn(b'<hp:case hp:required-namespace="x"><hh:margin><hc:intent value="-2100" unit="HWPUNIT"/>', out)
+        self.assertIn(b'<hp:default><hh:margin><hc:intent value="-4200" unit="HWPUNIT"/>', out)
+        self.assertEqual(_apply(ops.op_set_para_hanging_indent, out, {"to": -21.0}), out)
+
     def test_align(self):
         out = _apply(ops.op_set_para_align, PARA_PR, {"to": "JUSTIFY"})
         self.assertIn(b'<hh:align horizontal="JUSTIFY" vertical="BASELINE"/>', out)
@@ -158,6 +164,15 @@ class FormatHwpxTest(unittest.TestCase):
             if pa["index"] not in targets:
                 self.assertEqual(pa["para_format"], pb["para_format"])
                 self.assertEqual(pa["runs"], pb["runs"])
+
+    def test_hanging_indent_fixed(self):
+        res = self._run()
+        self.assertIn("set_para_hanging_indent", [a["op"] for a in res["fix"]["applied"]])
+        after = json.loads((self.dir / "out" / "check_after.json").read_text(encoding="utf-8"))
+        aligns = [r["status"] for r in after["results"]
+                  if r["rule_id"] == "HANGING_INDENT" and r.get("sub_item") == "둘째 줄 정렬"]
+        self.assertTrue(aligns)
+        self.assertEqual(set(aligns), {"PASS"})
 
     def test_idempotent_second_run(self):
         res = self._run()

@@ -56,9 +56,15 @@ def inspection(paragraphs, app="Hancom Office Hangul", tables=None):
             p["para_format"]["para_pr_id"] = 100 + i   # 문단마다 다른 paraPr (공유 영향 배제)
     return {
         "schema_version": "1.0", "paragraphs": paragraphs, "tables": tables or [],
-        "format_definitions": {"char_properties": {"0": {"id": 0, "font_face": {"hangul": "휴먼명조"},
-                                                         "ratio": {"hangul": 100, "latin": 100},
-                                                         "spacing": {"hangul": 0, "latin": 0}}}},
+        "format_definitions": {"char_properties": {
+            "0": {"id": 0, "font_face": {"hangul": "휴먼명조"}, "size_pt": 14.0,
+                  "ratio": {"hangul": 100, "latin": 100}, "spacing": {"hangul": 0, "latin": 0}},
+            # 1: 공백만 있는 run 용 10pt 자간 -10% (자동 수정 대상이 아닌 글자 모양)
+            "1": {"id": 1, "font_face": {"hangul": "휴먼명조"}, "size_pt": 10.0,
+                  "ratio": {"hangul": 100, "latin": 100}, "spacing": {"hangul": -10, "latin": -10}},
+            # 2: 자간 -4% 글자 모양(보이는 글자 run → 자간 수정 후 0% 기준으로 폭 계산)
+            "2": {"id": 2, "font_face": {"hangul": "휴먼명조"}, "size_pt": 14.0,
+                  "ratio": {"hangul": 100, "latin": 100}, "spacing": {"hangul": -4, "latin": -4}}}},
         "verification": {"all_ok": True},
         "document": {"sections": []},
         "package": {"version": {"application": app}},
@@ -269,34 +275,65 @@ class HangingIndentTest(unittest.TestCase):
         out, _ = hanging([P("  □ 앞 공백")])
         self.assertIn("앞에 공백 2칸", out[(0, "번호·기호 뒤 공백")]["observation"])
 
-    def test_multiline_without_hanging_fails(self):
-        out, res = hanging([P("□ 두 줄로 넘어가는 긴 항목 문단", indent=0, lines=2),
-                            P("□ 들여쓰기된 두 줄 문단", indent=10, lines=2)])
-        for i in (0, 1):
-            r = out[(i, "둘째 줄 정렬")]
-            self.assertEqual(r["status"], "FAIL")
-            self.assertFalse(r["fix"]["possible"])
-            self.assertIn("글꼴 너비", r["fix"]["blocked_reason"])
-        self.assertTrue(any(m["rule_id"] == "HANGING_INDENT" for m in res["fix_plan"]["manual_review"]))
+    def _align(self, paras, i=0, **kw):
+        out, res = hanging(paras, **kw)
+        return out[(i, "둘째 줄 정렬")], res
 
-    def test_hanging_present_is_unknown(self):
-        out, _ = hanging([P("□ 내어쓰기가 있는 두 줄 문단", indent=-28.0, lines=2)])
-        r = out[(0, "둘째 줄 정렬")]
-        self.assertEqual(r["status"], "UNKNOWN")
-        self.assertIn("2.0자 폭", r["observation"])
+    def test_width_estimate_by_char_count(self):
+        # 14pt 기준: 한글·기호 1칸 = 14pt, 공백·숫자·괄호·마침표 0.5칸 = 7pt
+        cases = [("□ 항목", 21.0), ("  □ 앞 공백", 35.0), ("ㅇ 세부", 21.0), ("- 하위", 14.0),
+                 ("1) 번호", 21.0), ("가. 번호", 28.0), ("1. 번호", 21.0)]
+        for text, width in cases:
+            r, _ = self._align([P(text, indent=0)])
+            self.assertEqual(r["expected"]["value"]["indent_pt"], -width, text)
+            self.assertEqual(r["status"], "FAIL", text)
 
-    def test_single_line_skipped(self):
-        out, res = hanging([P("□ 한 줄 문단", lines=1)])
-        self.assertNotIn((0, "둘째 줄 정렬"), out)
-        self.assertTrue(any(r["status"] == "SKIP" and r["rule_id"] == "HANGING_INDENT" for r in res["results"]))
+    def test_fail_has_auto_fix_action(self):
+        r, res = self._align([P("□ 내어쓰기 없는 문단", indent=0)])
+        self.assertTrue(r["fix"]["possible"])
+        self.assertEqual(r["fix"]["mode"], "auto_if_role_confirmed")
+        a = r["fix"]["actions"][0]
+        self.assertEqual((a["op"], a["from"], a["to"]), ("set_para_hanging_indent", 0, -21.0))
+        self.assertTrue(any(x["op"] == "set_para_hanging_indent" for x in res["fix_plan"]["role_based_actions"]))
 
-    def test_untrusted_layout_or_missing(self):
-        out, _ = hanging([P("□ 두 줄 문단", lines=2)], app="Other Writer")
-        self.assertEqual(out[(0, "둘째 줄 정렬")]["status"], "UNKNOWN")
-        p = P("□ 두 줄 문단", lines=2)
+    def test_within_tolerance_passes(self):
+        r, _ = self._align([P("□ 거의 맞는 내어쓰기", indent=-21.6)])
+        self.assertEqual(r["status"], "PASS")
+        r, _ = self._align([P("□ 많이 다른 내어쓰기", indent=-28.0)])
+        self.assertEqual(r["status"], "FAIL")
+        self.assertIn("들여쓰기 10pt", self._align([P("□ 들여쓰기", indent=10)])[0]["current"]["display"])
+
+    def test_checked_regardless_of_lines_or_layout(self):
+        # 한 줄 문단, 줄 배치 정보 없음, 한글이 아닌 작성 프로그램 모두 검사한다(사용자 결정)
+        r, _ = self._align([P("□ 한 줄 문단", lines=1)])
+        self.assertEqual(r["status"], "FAIL")
+        p = P("□ 줄 배치 없는 문단")
         p["line_layout"] = None
-        out, _ = hanging([p])
-        self.assertIn("줄 배치 정보 없음", out[(0, "둘째 줄 정렬")]["reason"])
+        r, _ = self._align([p])
+        self.assertEqual(r["status"], "FAIL")
+        self.assertIn("줄 배치 정보 없음", r["observation"])
+        r, _ = self._align([P("□ 다른 프로그램", lines=2)], app="Other Writer")
+        self.assertEqual(r["status"], "FAIL")
+
+    def test_char_spacing_uses_standard_for_fixed_runs(self):
+        p = P("□ 자간 -4% 문단")
+        p["runs"] = [{"char_pr_id": 2, "chars": len(p["text"])}]
+        p["char_format"]["char_pr_id"] = 2
+        r, _ = self._align([p])
+        self.assertEqual(r["expected"]["value"]["indent_pt"], -21.0)   # 자간 수정 후(0%) 기준
+
+    def test_whitespace_run_uses_its_own_format(self):
+        p = P("  □ 앞 공백은 10pt 자간 -10%")
+        p["runs"] = [{"char_pr_id": 1, "chars": 2}, {"char_pr_id": 0, "chars": len(p["text"]) - 2}]
+        p["char_format_mixed_detail"] = [{"char_pr_ids": [0]}]
+        r, _ = self._align([p])
+        # 공백 2개 × 10pt × 0.5칸 × 0.9 = 9pt, □ 14pt, 공백 7pt
+        self.assertEqual(r["expected"]["value"]["indent_pt"], -30.0)
+
+    def test_tab_or_unknown_char_is_unknown(self):
+        r, _ = self._align([P("□\t탭 뒤 본문")])
+        self.assertEqual(r["status"], "UNKNOWN")
+        self.assertIn("U+0009", r["unknown_reason"])
 
     def test_auto_numbered_paragraph_is_checked_but_unknown(self):
         an = {"type": "NUMBER", "level": 0, "num_format": "DIGIT", "format_text": "^1."}

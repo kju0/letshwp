@@ -632,6 +632,77 @@ def _layout_trusted(doc):
     return any(n.lower() in app.lower() for n in names), app
 
 
+def _indent_label(v):
+    if v is None:
+        return "-"
+    if v < 0:
+        return "내어쓰기 %gpt" % -v
+    if v > 0:
+        return "들여쓰기 %gpt" % v
+    return "내어쓰기 없음(0pt)"
+
+
+# 글자 수 근사에서 '전각(1칸)' 으로 보는 문자 범위: 한글 음절·자모, 로마 숫자(Ⅰ), 원·괄호 숫자, 도형(□○ 등),
+# 기타 기호, CJK 기호·전각 문자, ※, 한자
+FULL_WIDTH_RANGES = ((0xAC00, 0xD7A3), (0x1100, 0x11FF), (0x3130, 0x318F), (0x2160, 0x217F), (0x2460, 0x24FF), (0x25A0, 0x25FF),
+                     (0x2600, 0x26FF), (0x3000, 0x303F), (0x3200, 0x32FF), (0xFF01, 0xFF60), (0x203B, 0x203B),
+                     (0x4E00, 0x9FFF))
+
+
+def char_width_class(ch):
+    """반환: ('full'|'half', 언어 슬롯) 또는 None(폭 기준 없음)."""
+    o = ord(ch)
+    if ch == "\t":
+        return None
+    if 0x20 <= o <= 0x7E or ch == "\u00a0":
+        return "half", "latin"
+    if any(a <= o <= b for a, b in FULL_WIDTH_RANGES):
+        return "full", "hangul"
+    return None
+
+
+def _width_rule_text(rc):
+    we = rc.get("width_estimate") or {}
+    return "한글·기호 %g칸, 공백·숫자·영문·괄호 %g칸, 1칸 = 글자 크기" % (we.get("full_em", 1.0), we.get("half_em", 0.5))
+
+
+def estimate_prefix_width(doc, p, n):
+    """문단 앞 n 글자(앞 공백 + 번호·기호 + 뒤 공백)의 폭(pt)을 글자 수로 근사한다.
+    각 글자는 자기 run 의 글자 모양(크기·장평·자간)을 쓴다. 자간·장평은 자동 수정 대상 글자 모양이면
+    수정 후 표준값으로 계산한다(Formatter 가 함께 바꾸므로). 반환: ((폭, 내역), None) 또는 (None, 사유)"""
+    rc = doc.rule_cfg("HANGING_INDENT")
+    we = rc.get("width_estimate") or {}
+    em = {"full": we.get("full_em", 1.0), "half": we.get("half_em", 0.5)}
+    visible = set(doc.visible_char_pr_ids(p))
+    std_ratio = doc.rule_cfg("CHAR_RATIO").get("value")
+    std_spacing = doc.rule_cfg("CHAR_SPACING").get("value")
+    text = p.get("text") or ""
+    owner = []
+    for run in p.get("runs") or []:
+        owner.extend([run.get("char_pr_id")] * (run.get("chars") or 0))
+    if len(owner) < n:
+        return None, "run 별 글자 수 정보가 문단 텍스트와 맞지 않음"
+    total, parts = 0.0, []
+    for i, ch in enumerate(text[:n]):
+        cls = char_width_class(ch)
+        if cls is None:
+            return None, "폭 기준이 없는 문자 '%s'(U+%04X)가 번호·기호 부분에 있음" % (ch.replace("\t", "탭"), ord(ch))
+        kind, lang = cls
+        cp = doc.char_pr(owner[i])
+        if not cp:
+            return None, "글자 모양 정의(charPr %s)가 없음" % owner[i]
+        size = (cp.get("effective_size_pt") or {}).get(lang) or cp.get("size_pt")
+        if not size:
+            return None, "글자 크기를 알 수 없음(charPr %s)" % owner[i]
+        fixed = owner[i] in visible
+        ratio = std_ratio if fixed and std_ratio is not None else (cp.get("ratio") or {}).get(lang, 100)
+        spacing = std_spacing if fixed and std_spacing is not None else (cp.get("spacing") or {}).get(lang, 0)
+        w = size * em[kind] * ratio / 100.0 * (1 + spacing / 100.0)
+        total += w
+        parts.append("%s %gpt" % ("공백" if ch == " " else ch, round(w, 2)))
+    return (total, parts), None
+
+
 def rule_hanging_indent(doc):
     rc = doc.rule_cfg("HANGING_INDENT")
     trusted, app = _layout_trusted(doc)
@@ -669,68 +740,52 @@ def rule_hanging_indent(doc):
                     recommendation=None if ok else "글자·공백을 추가·삭제하지 않는 원칙상 자동 수정 대상 아님. 작성자가 번호·기호 뒤 공백을 한 칸으로 정리",
                     extra={"sub_item": "번호·기호 뒤 공백"}))
 
-        # (2) 둘째 줄 정렬 - 줄 배치 캐시로 확정 가능한 경우만 판정
+        # (2) 둘째 줄 정렬 - 번호·기호 부분의 폭을 글자 수로 근사해 내어쓰기 값과 비교(줄 수와 무관하게 모든 항목 문단)
         ll = p.get("line_layout")
         sub = {"sub_item": "둘째 줄 정렬"}
-        cur_indent = {"indent_pt": pf.get("indent_pt"), "left_margin_pt": pf.get("left_margin_pt")}
-        if not trusted:
-            results.append(make_result(doc, "HANGING_INDENT", UNKNOWN, "줄 배치 정보를 신뢰할 수 없음", target_of(p), role_of(p),
-                                       unknown_reason="작성 프로그램(%s)이 한글이 아니어서 hp:linesegarray 가 실제 배치와 다를 수 있음" % (app or "미상"),
-                                       needed_info="한글로 저장한 파일 또는 렌더링 결과", extra=sub))
-            continue
-        if not ll:
-            results.append(make_result(doc, "HANGING_INDENT", UNKNOWN, "줄 배치 정보 없음", target_of(p), role_of(p),
-                                       unknown_reason="hp:linesegarray 가 없거나 이전 버전 Inspector 결과(line_layout 없음)",
-                                       needed_info="Inspector 재실행 또는 한글로 다시 저장", extra=sub))
-            continue
-        if ll["line_count"] < 2:
-            skipped.append((p, "현재 한 줄 문단(줄바꿈 없음) - 둘째 줄 정렬 검사 대상 아님"))
-            continue
         indent = pf.get("indent_pt")
-        size = (p.get("char_format") or {}).get("size_pt")
-        prefix = text[: len(text) - len(text.lstrip())] + (marker or "")
-        if marker:
-            s2 = text.lstrip()[len(marker):]
-            prefix += s2[: len(s2) - len(s2.lstrip(" \t\u3000\u00a0\u2007"))]
-        current = {"value": {"line_count": ll["line_count"], **cur_indent},
-                   "display": "줄 %d개, 문단 들여쓰기 %spt%s" % (
-                       ll["line_count"], indent,
-                       " (내어쓰기 %gpt)" % -indent if indent is not None and indent < 0 else ""),
-                   "source": VALUE_SOURCE + " - paraPr/margin@intent, 줄 수는 " + (ll.get("source") or ""),
-                   "refs": {"para_pr_id": pf.get("para_pr_id")}, "role_label": p["role"]["label"]}
-        expected = {"value": "둘째 줄 시작 x = 첫째 줄 본문 첫 글자 x",
-                    "display": "내어쓰기 = 번호·기호와 뒤 공백(앞 공백 포함)의 너비", "basis": rc["spec_text"]}
-        if indent is None:
-            results.append(make_result(doc, "HANGING_INDENT", UNKNOWN, "문단 들여쓰기 값을 추출하지 못함",
-                                       target_of(p), role_of(p), current, expected,
-                                       unknown_reason="paraPr margin@intent 없음", needed_info="문단 모양 정의", extra=sub))
-            continue
+        lines_note = ("줄 %d개(한글 저장 줄 배치 기준%s)" % (ll["line_count"], "" if trusted else ", 작성 프로그램이 한글이 아니라 참고만")
+                      if ll else "줄 배치 정보 없음 - 줄 수와 관계없이 검사")
+        current = {"value": {"indent_pt": indent, "left_margin_pt": pf.get("left_margin_pt")},
+                   "display": _indent_label(indent),
+                   "source": VALUE_SOURCE + " - paraPr/margin@intent", "refs": {"para_pr_id": pf.get("para_pr_id")},
+                   "role_label": p["role"]["label"]}
         if auto:
             results.append(make_result(doc, "HANGING_INDENT", UNKNOWN, "자동 번호 문단의 번호 너비를 알 수 없음",
-                                       target_of(p), role_of(p), current, expected,
+                                       target_of(p), role_of(p), current, None,
                                        unknown_reason="번호가 본문 텍스트에 없고 자동 번호 너비·정렬 설정의 해석이 확인되지 않음",
-                                       needed_info="렌더링 결과 또는 자동 번호 너비", extra=sub))
+                                       needed_info="렌더링 결과 또는 자동 번호 너비", observation=lines_note, extra=sub))
             continue
-        if indent >= 0:
-            # 내어쓰기가 없으면 둘째 줄은 첫째 줄 시작(번호·기호 위치) 또는 그보다 왼쪽에서 시작한다.
-            results.append(make_result(
-                doc, "HANGING_INDENT", FAIL,
-                "%d줄 문단인데 내어쓰기가 없음(들여쓰기 %gpt). 둘째 줄이 번호·기호 위치%s에서 시작해 첫째 줄 본문 첫 글자와 정렬되지 않음"
-                % (ll["line_count"], indent, "보다 왼쪽" if indent > 0 else ""),
-                target_of(p), role_of(p), current, expected,
-                fix_actions=[{"op": "set_para_hanging_indent", "para_pr_id": pf.get("para_pr_id"), "from": cur_indent, "to": None}],
-                blocked_reason="목표 내어쓰기 값(번호·기호와 뒤 공백, 앞 공백의 실제 글꼴 너비)을 계산하려면 글꼴 너비 정보가 필요",
-                recommendation="문단 모양의 내어쓰기(hh:margin intent 음수)를 번호·기호와 뒤 공백 너비만큼 설정(한글 Shift+Tab 효과). 글자·공백은 변경하지 않음",
-                observation="줄 수는 한글이 저장 시 기록한 줄 배치 캐시 기준", extra=sub))
-        else:
-            approx = " 글자 크기(%gpt) 기준 약 %.1f자 폭, 번호·기호 앞뒤 문자 %d자('%s')" % (
-                size, -indent / size, len(prefix), prefix.replace("\t", "→")) if size else ""
-            results.append(make_result(
-                doc, "HANGING_INDENT", UNKNOWN, "내어쓰기 %gpt 가 설정되어 있음" % -indent,
-                target_of(p), role_of(p), current, expected,
-                unknown_reason="내어쓰기 폭이 번호·기호와 공백의 실제 너비와 같은지는 글꼴 너비 계산 없이 확인할 수 없음",
-                needed_info="글꼴 너비 정보 또는 렌더링 결과",
-                observation=("참고:" + approx) if approx else None, extra=sub))
+        s = text.lstrip()
+        prefix = text[: len(text) - len(s)] + marker
+        s2 = s[len(marker):]
+        prefix += s2[: len(s2) - len(s2.lstrip(" \t\u3000\u00a0\u2007"))]
+        est, why = estimate_prefix_width(doc, p, len(prefix))
+        if indent is None or est is None:
+            results.append(make_result(doc, "HANGING_INDENT", UNKNOWN,
+                                       "문단 들여쓰기 값을 추출하지 못함" if indent is None else "번호·기호 부분의 폭을 추정할 수 없음",
+                                       target_of(p), role_of(p), current, None,
+                                       unknown_reason="paraPr margin@intent 없음" if indent is None else why,
+                                       needed_info="문단 모양 정의" if indent is None else "해당 문자의 폭 기준(설정 HANGING_INDENT.width_estimate)",
+                                       observation=lines_note, extra=sub))
+            continue
+        width, parts = est
+        target = -round(width, 2)
+        expected = {"value": {"indent_pt": target},
+                    "display": "%s ('%s' 추정 폭: %s)" % (_indent_label(target), prefix.replace("\t", "→"), " + ".join(parts)),
+                    "basis": rc["spec_text"] + " / 폭은 글자 수 근사(%s)" % _width_rule_text(rc)}
+        tol = (rc.get("width_estimate") or {}).get("tolerance_pt", 1.0)
+        ok = abs(indent - target) <= tol
+        reason = "내어쓰기 %s 기준 %s (허용 오차 ±%gpt)" % (
+            _indent_label(indent), ("=" if ok else "≠") + " " + _indent_label(target), tol)
+        actions = None if ok else [{
+            "op": "set_para_hanging_indent", "para_pr_id": pf.get("para_pr_id"),
+            "xml": "Contents/header.xml hh:paraPr[@id=%s]//hh:margin/hc:intent@value" % pf.get("para_pr_id"),
+            "from": indent, "to": target,
+            "note": "목표값으로 설정(누적 없음). hp:switch case 에는 pt×100, default 에는 그 2배 값. 왼쪽 여백은 바꾸지 않음"}]
+        results.append(make_result(doc, "HANGING_INDENT", PASS if ok else FAIL, reason, target_of(p), role_of(p),
+                                   current, expected, fix_actions=actions,
+                                   observation="%s. 폭은 글꼴 실측이 아닌 글자 수 근사값" % lines_note, extra=sub))
     return results + skip_group(doc, "HANGING_INDENT", skipped)
 
 

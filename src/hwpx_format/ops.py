@@ -76,6 +76,21 @@ def op_set_para_space_before(data, root, a):
     return edits
 
 
+def op_set_para_hanging_indent(data, root, a):
+    # hc:intent 음수 = 내어쓰기. case(HwpUnitChar)·switch 없는 margin 은 pt×100, default 는 그 2배(샘플 관측).
+    # 왼쪽 여백(hc:left)은 바꾸지 않는다.
+    base = int(round(float(a["to"]) * HWPUNIT_PER_PT))
+    edits = []
+    for margin in _only(list(root.iter("margin")), "hh:margin"):
+        for intent in _only(margin.kids("intent"), "hc:intent"):
+            unit = intent.attrs.get("unit", "HWPUNIT")
+            if unit != "HWPUNIT":
+                raise OpNotApplicable("들여쓰기 단위가 HWPUNIT 이 아님(%s)" % unit)
+            value = base * 2 if margin.has_ancestor("default", stop=root) else base
+            edits.append(set_attr_edit(data, intent, "value", value))
+    return edits
+
+
 DEF_OPS = {
     "set_char_spacing": ("charPr", op_set_char_spacing),
     "set_char_ratio": ("charPr", op_set_char_ratio),
@@ -83,6 +98,7 @@ DEF_OPS = {
     "set_para_align": ("paraPr", op_set_para_align),
     "set_para_line_spacing": ("paraPr", op_set_para_line_spacing),
     "set_para_space_before": ("paraPr", op_set_para_space_before),
+    "set_para_hanging_indent": ("paraPr", op_set_para_hanging_indent),
 }
 
 
