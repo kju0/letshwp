@@ -19,7 +19,7 @@ tests/                        자동 테스트 (python3 -m unittest discover -s 
 
 ## 0. Claude Code 에서 사용하기 (코드·명령어 없이 대화로 작업)
 
-사용자는 Claude Code 데스크톱 앱 또는 웹에서 아래 네 가지를 요청한다. 규칙은 CLAUDE.md "작업 모드", 지금까지의 맥락은 [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md) 에 있다.
+사용자는 Claude Code 데스크톱 앱 또는 웹에서 아래 다섯 가지를 요청한다. 규칙은 CLAUDE.md "작업 모드", 지금까지의 맥락은 [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md) 에 있다.
 
 | 모드 | 이렇게 말하기 | 하는 일 |
 |---|---|---|
@@ -27,6 +27,7 @@ tests/                        자동 테스트 (python3 -m unittest discover -s 
 | 원격 저장소 연결 | "push 해줘" / "pull 해줘" 또는 `/push`, `/pull` | 테스트 → 커밋 → GitHub push / 최신 코드 가져오기 |
 | 테스트 | hwpx 첨부(또는 경로) + "테스트해줘" 또는 `/test 파일` | 저장소 코드로 Inspector → Checker 실행, 출력 파일 전달 |
 | 수정 | hwpx 첨부(또는 경로) + "수정해줘" 또는 `/fix 파일` | 검사 → 서식 수정 → 재검사·검증, 수정본 hwpx 와 마크다운 수정 보고서 전달 |
+| 배포 | "배포해줘" / "봇 상태" / "롤백해줘" 또는 `/deploy` | push 된 코드를 서버에 배포하고 Mattermost 봇 재시작·연결 확인 (실패 시 자동 복구) |
 
 테스트 결과는 `output/<파일명>_<시각>/` 에 저장된다: `check_report.txt`(검사 보고서), `check.json`, `inspection_report.txt`, `inspection.json`, `run_info.json`(원본 무변경 확인, 실행한 코드 커밋), `source.hwpx`(원본 복사본).
 수정 결과는 `output/<파일명>_<시각>_수정/` 에 저장된다: `<파일명>_수정본.hwpx`, `change_report.md`(수정 내역), `fix_result.json`, `check_before*`/`check_after*`(수정 전후 검사), `run_info.json`, `source.hwpx`.
@@ -244,7 +245,41 @@ python3 src/formatter.py samples/문서.hwpx --out-dir output/문서_fix    # �
 
 ---
 
-## 4. 테스트
+## 4. Mattermost 봇과 서버 배포
+
+### 봇 사용법 (Mattermost)
+- 봇 `@letshwp` 에게 hwpx 를 첨부해 DM 을 보내거나, 채널에서 `@letshwp` 멘션 + 첨부.
+- 메시지 없음/`수정` → 서식 수정(수정본 hwpx + change_report.md 를 스레드 답장으로). `검사`/`테스트` → 검사만(check_report.txt).
+  `A`/`B` 를 함께 쓰면 문서 유형 지정(예: `수정 B`). `도움말` → 안내.
+- 봇은 저장소 실행기(scripts/run_fix.py, run_test.py)를 그대로 실행한다. 검증 실패 시 수정본 없이 실패 사유만 답한다.
+- 첨부·결과는 서버 `<base>/shared/data/inbox|output/` 에 저장되고 30일 후 지워진다(LETSHWP_KEEP_DAYS).
+
+### 구성
+| 파일 | 역할 |
+|---|---|
+| src/mmbot/websocket.py | 표준 라이브러리 WebSocket 클라이언트(이벤트 수신) |
+| src/mmbot/client.py | Mattermost REST API v4(파일 받기·올리기, 글 쓰기) |
+| src/mmbot/handler.py | 메시지 해석, 실행기 실행, 답장 구성(실행기 출력 파일만 사용) |
+| src/mmbot/bot.py | 이벤트 루프, 작업 큐(한 번에 하나), 재연결, status.json |
+| scripts/run_bot.py | 봇 실행(`--env 설정파일`), `--check` 연결 확인 |
+| scripts/deploy.py | 배포·상태·롤백·로그·토큰 저장 |
+| deploy/ | deploy.json(서버 정보), systemd 유닛, bot.env.example |
+
+### 배포 (`python3 scripts/deploy.py ...`, Claude 에게 "배포해줘")
+```
+deploy            # 로컬 테스트 → git archive 업로드 → 서버 테스트 → current 교체 → 재시작 → 연결 확인(실패 시 자동 복구)
+status | rollback | logs -n 50
+setup             # 최초 1회: 폴더·설정 파일·systemd 서비스(봇 실행 계정 letshwp 생성)
+join-bot          # 봇 계정을 팀·채널에 추가(봇 계정은 시스템 콘솔 > 통합 > 봇 계정에서 생성)
+printf %s "<토큰>" | python3 scripts/deploy.py set-token
+set-env MM_URL=http://127.0.0.1:8065
+```
+서버 폴더: `<base>/releases/<시각>_<커밋>/`, `<base>/current`, `<base>/shared/bot.env`(600), `<base>/shared/data/`, `<base>/deploy_history.log`.
+배포본에는 .git 이 없으므로 `DEPLOY_VERSION.json` 의 커밋이 run_info.json 의 코드 버전으로 기록된다.
+
+---
+
+## 5. 테스트
 
 ```
 python3 -m unittest discover -s tests -v                       # Inspector + Checker + Formatter 전체

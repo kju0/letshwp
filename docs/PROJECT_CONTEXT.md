@@ -5,11 +5,12 @@ Claude Code 는 세션을 시작할 때 이 문서를 먼저 읽는다. 개발 �
 
 ## 1. 사용자 작업 방식
 - 사용자는 코드를 보지 않고 python 명령도 직접 실행하지 않는다. Claude Code 데스크톱 앱 또는 웹(claude.ai/code)에서 대화로만 작업한다.
-- 작업 모드는 네 가지다(자세한 절차는 CLAUDE.md "작업 모드").
+- 작업 모드는 다섯 가지다(자세한 절차는 CLAUDE.md "작업 모드").
   - **개발**: 기능·버그·개선 요청 → 코드와 테스트 수정. git 반영은 하지 않는다.
   - **원격 저장소 연결**: "push 해줘" / "pull 해줘" → Git 작업 규칙을 따른다.
   - **테스트**: hwpx 제공 → `scripts/run_test.py` 로 저장소 코드를 실행 → 출력 파일을 그대로 전달한다.
   - **수정**: hwpx 제공 + "수정해줘" → `scripts/run_fix.py` 실행 → 수정본 hwpx 와 change_report.md 를 전달한다.
+  - **배포**: "배포해줘" / "봇 상태" / "롤백해줘" → `scripts/deploy.py` 로 서버 배포·확인.
 - AI 가 문서를 직접 수정하거나 결과를 만들어 내지 않는다. 결과는 반드시 코드를 실행해서 얻는다.
 - 원격 저장소: https://github.com/kju0/letshwp (브랜치 main)
 
@@ -21,6 +22,8 @@ Claude Code 는 세션을 시작할 때 이 문서를 먼저 읽는다. 개발 �
 | 테스트 실행기 | scripts/run_test.py | 완료 |
 | Formatter (실제 서식 수정·검증) | src/formatter.py, src/hwpx_format/ | 완료(2026-10-25). 한글 프로그램에서 연 화면 확인은 미실시 |
 | 수정 모드 실행기 | scripts/run_fix.py | 완료 |
+| Mattermost 봇 | src/mmbot/, scripts/run_bot.py | 완료(2026-10-28) |
+| 배포 실행기 | scripts/deploy.py, deploy/ | 완료(2026-10-28) |
 
 - 표준 라이브러리만 사용한다(폐쇄망).
 - 테스트: `python3 -m unittest discover -s tests`. 2026-10-27 기준 103개 통과(Formatter 21개, 내어쓰기 규칙 10개 포함), 실제 샘플 테스트 1개는 환경변수가 있을 때만 실행.
@@ -65,6 +68,14 @@ Claude Code 는 세션을 시작할 때 이 문서를 먼저 읽는다. 개발 �
    - 대상은 문서표준의 항목 번호·기호 문단만. ※ 등 표준에 없는 문두 기호는 넣지 않는다(2026-10-27 사용자 결정).
    - 로봇집사 문서: 내어쓰기 23건 FAIL → 모두 PASS, 검증 통과.
 
+8. **Mattermost 봇·서버 배포**(2026-10-28):
+   - 서버: Tailscale 100.123.150.118 (kftc-robot-butler, Ubuntu 24.04, Python 3.12). Mattermost 11.7 은 도커(robot-butler-mattermost-mattermost-1), 100.123.150.118:8065.
+   - SSH 는 root 로만 키 접속된다(mattermost-admin 은 키 미등록). 봇은 시스템 계정 `letshwp` 로 systemd 서비스 `letshwp-bot` 실행.
+   - 서버 폴더 /opt/letshwp: releases/<시각>_<커밋>/, current 링크, shared/bot.env(토큰, 600), shared/data/(inbox·output·status.json).
+   - 봇: WebSocket 으로 DM·멘션 글 수신 → 첨부 hwpx 저장 → run_fix/run_test 를 별도 프로세스로 실행 → 스레드 답장(수정본·보고서 첨부). 작업은 한 번에 하나.
+   - 배포: push 된 커밋만. 로컬 테스트 → git archive 업로드 → 서버 테스트 → 링크 교체·재시작 → status.json 의 connected 확인, 실패 시 직전 릴리스로 자동 복구. 배포본은 DEPLOY_VERSION.json 으로 코드 버전 기록.
+   - mmctl 로컬 모드로는 봇 계정 생성이 안 된다 → 시스템 콘솔에서 생성, 토큰은 `deploy.py set-token`, 팀·채널 추가는 `deploy.py join-bot`.
+
 ## 4. 핵심 기술 판단 (근거: docs/HWPX_STRUCTURE.md)
 - charPr/paraPr ID 하나가 완전한 속성 집합이다. 스타일 상속을 계산할 필요가 없다.
 - `hp:switch` 는 이해하는 첫 case(2016/HwpUnitChar, 2016/paragraph 네임스페이스)를 쓰고, 없으면 default 를 쓴다. default 의 여백 값은 case 값의 2배로 저장된다.
@@ -96,6 +107,9 @@ Claude Code 는 세션을 시작할 때 이 문서를 먼저 읽는다. 개발 �
 - [ ] 자간·장평의 한자·일본어 등 나머지 언어 슬롯도 0%/100% 로 맞출지(현재는 한글·영문만).
 - [ ] 미등록 글꼴(문서 글꼴 목록에 없는 휴먼명조/HY헤드라인M)을 목록에 추가해 적용할지(현재는 미적용 보고).
 
+- [ ] 봇이 답할 채널 범위(현재 DM + 멘션, deploy.json 의 channels 에 넣은 채널에만 봇이 들어가 있음).
+- [ ] 첨부·결과 보관 기간(현재 30일 후 자동 삭제).
+
 ## 7. 다음 후보 작업
 - Formatter 보강: 위 미결정 사항이 정해지면 반영. 자동 번호 문단의 내어쓰기.
-- Mattermost 봇 연동, 웹 UI: 추후.
+- 웹 UI: 추후.
