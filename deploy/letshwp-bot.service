@@ -1,0 +1,15 @@
+[Unit]
+Description=letshwp Mattermost bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User={run_user}
+WorkingDirectory={base_dir}/current
+ExecStart={python} {base_dir}/current/scripts/run_bot.py --env {base_dir}/shared/bot.env
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

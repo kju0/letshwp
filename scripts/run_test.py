@@ -42,8 +42,17 @@ def git_info():
                                   timeout=10).stdout.strip() or None
         except (OSError, subprocess.SubprocessError):
             return None
+    commit = g("rev-parse", "HEAD") if (ROOT / ".git").exists() else None
+    if commit is None and (ROOT / "DEPLOY_VERSION.json").is_file():
+        # 서버 배포본에는 .git 이 없다. 배포 스크립트가 남긴 커밋 정보를 쓴다
+        try:
+            v = json.loads((ROOT / "DEPLOY_VERSION.json").read_text(encoding="utf-8"))
+            return {"commit": v.get("commit"), "branch": v.get("branch"), "uncommitted_code_changes": False,
+                    "deployed_at": v.get("deployed_at")}
+        except ValueError:
+            pass
     status = g("status", "--porcelain", "--", "src", "config", "scripts")
-    return {"commit": g("rev-parse", "HEAD"), "branch": g("rev-parse", "--abbrev-ref", "HEAD"),
+    return {"commit": commit, "branch": g("rev-parse", "--abbrev-ref", "HEAD"),
             "uncommitted_code_changes": bool(status)}
 
 

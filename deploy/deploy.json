@@ -1,0 +1,18 @@
+{
+  "host": "100.123.150.118",
+  "user": "root",
+  "run_user": "letshwp",
+  "base_dir": "/opt/letshwp",
+  "service": "letshwp-bot",
+  "service_scope": "system",
+  "python": "/usr/bin/python3",
+  "keep_releases": 5,
+  "mattermost": {
+    "container": "robot-butler-mattermost-mattermost-1",
+    "bot_username": "letshwp",
+    "team": "letshwp",
+    "channels": [
+      "town-square"
+    ]
+  }
+}
