@@ -249,7 +249,8 @@ python3 src/formatter.py samples/문서.hwpx --out-dir output/문서_fix    # �
 
 ### 봇 사용법 (Mattermost)
 - 봇 `@letshwp` 에게 hwpx 를 첨부해 DM 을 보내거나, 채널에서 `@letshwp` 멘션 + 첨부.
-- 메시지 없음/`수정` → 서식 수정(수정본 hwpx + change_report.md 를 스레드 답장으로). `검사`/`테스트` → 검사만(check_report.txt).
+- 메시지 없음/`수정` → 서식 수정. 스레드 답장에 **수정본 hwpx 하나만** 첨부하고, 메시지에는 change_report.md 의 "수정한 내용"과
+  "직접 확인 필요" 항목만 싣는다(검증 통과·적합 집계는 생략, 표가 길면 항목별 건수만). `검사`/`테스트` → 검사만(check_report.txt).
   `A`/`B` 를 함께 쓰면 문서 유형 지정(예: `수정 B`). `도움말` → 안내.
 - 봇은 저장소 실행기(scripts/run_fix.py, run_test.py)를 그대로 실행한다. 검증 실패 시 수정본 없이 실패 사유만 답한다.
 - 첨부·결과는 서버 `<base>/shared/data/inbox|output/` 에 저장되고 30일 후 지워진다(LETSHWP_KEEP_DAYS).
