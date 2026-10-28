@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -65,8 +66,8 @@ def parse_request(message, bot_username=None):
 
 
 def safe_filename(name):
-    """첨부 파일명에서 경로·제어 문자를 없앤다."""
-    name = Path(str(name).replace("\\", "/")).name
+    """첨부 파일명에서 경로·제어 문자를 없앤다. macOS 가 보내는 자모 분리형(NFD) 한글은 NFC 로 합친다."""
+    name = unicodedata.normalize("NFC", Path(str(name).replace("\\", "/")).name)
     name = re.sub(r"[\x00-\x1f\x7f]", "", name).strip().lstrip(".")
     return name or "document.hwpx"
 

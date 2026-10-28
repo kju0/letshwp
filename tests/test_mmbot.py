@@ -210,6 +210,10 @@ class ParseRequestTest(unittest.TestCase):
         self.assertEqual(handler.safe_filename("a\\b\\c.hwpx"), "c.hwpx")
         self.assertEqual(handler.safe_filename("..hwpx"), "hwpx")
         self.assertEqual(handler.safe_filename(""), "document.hwpx")
+        import unicodedata
+        nfd = unicodedata.normalize("NFD", "보고서.hwpx")
+        self.assertNotEqual(nfd, "보고서.hwpx")
+        self.assertEqual(handler.safe_filename(nfd), "보고서.hwpx")
 
 
 def posted(post, channel_type="O", mentions=None):
