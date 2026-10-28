@@ -7,7 +7,7 @@
     python3 scripts/deploy.py rollback                    직전 배포 버전으로 되돌리기
     python3 scripts/deploy.py logs [-n 50]                봇 로그
     python3 scripts/deploy.py join-bot                    봇 계정을 팀·채널에 추가(계정은 시스템 콘솔에서 생성)
-    printf %s "<토큰>" | python3 scripts/deploy.py set-token   봇 토큰 저장(표준 입력으로만 받는다)
+    python3 scripts/deploy.py set-token                   봇 토큰 교체: 숨김 입력(또는 표준 입력) → 서버에서 확인 후 저장·재시작
     python3 scripts/deploy.py set-env KEY=VALUE           서버 설정 파일 값 변경(토큰 제외)
 
 배포 순서(하나라도 실패하면 중단, 서버 반영 후 실패하면 직전 버전으로 자동 복구)
@@ -24,7 +24,9 @@
 
 import argparse
 import datetime
+import getpass
 import io
+import re
 import json
 import shlex
 import subprocess
@@ -267,6 +269,57 @@ def cmd_set_env(cfg, key, value):
         raise DeployError("설정 저장 실패", 4)
 
 
+TOKEN_RE = re.compile(r"^[a-z0-9]{26}$")
+
+
+def read_token(stdin=None):
+    """토큰을 숨김 입력(터미널) 또는 표준 입력으로 받는다. 화면·명령줄·대화에 남지 않게 한다."""
+    stdin = stdin or sys.stdin
+    if stdin.isatty():
+        token = getpass.getpass("새 봇 토큰(Access Token)을 붙여 넣고 Enter — 입력 내용은 보이지 않습니다: ")
+    else:
+        token = stdin.read()
+    token = token.strip()
+    if not TOKEN_RE.match(token):
+        raise DeployError("토큰 형식이 아닙니다(영문 소문자·숫자 26자). Token ID 가 아닌 Access Token 인지 확인하세요.")
+    return token
+
+
+def set_token_script(cfg):
+    """표준 입력의 토큰으로 서버에서 Mattermost 접속을 먼저 확인하고(봇 계정이어야 함),
+    통과하면 설정 파일에 저장한 뒤 봇을 재시작해 연결을 확인한다. 확인 실패 시 기존 토큰을 유지한다."""
+    env = cfg["base_dir"] + "/shared/bot.env"
+    verify = ("import json,re,sys,urllib.request;t=sys.stdin.read().strip();"
+              "u=re.search(r'(?m)^MM_URL=(.*)$',open(sys.argv[1],encoding='utf-8').read()).group(1).strip();"
+              "r=urllib.request.Request(u.rstrip('/')+'/api/v4/users/me',headers={'Authorization':'Bearer '+t});"
+              "d=json.load(urllib.request.urlopen(r,timeout=15));"
+              "sys.exit('봇 계정 토큰이 아닙니다') if not d.get('is_bot') else print('토큰 확인: @'+d['username'])")
+    return """
+set -u
+TOKEN=$(cat)
+if ! printf %s "$TOKEN" | {py} -c {verify} {env} 2>/tmp/letshwp_token_err; then
+  echo "토큰 확인 실패 — 기존 토큰을 그대로 둡니다."; tail -n 1 /tmp/letshwp_token_err; rm -f /tmp/letshwp_token_err; exit 3
+fi
+rm -f /tmp/letshwp_token_err
+printf %s "$TOKEN" | {{ {save}; }} || exit 4
+unset TOKEN
+HEALTH=$( {health} )
+echo "$HEALTH"
+echo "$HEALTH" | grep -q HEALTH_OK || exit 4
+""".format(py=q(cfg["python"]), verify=q(verify), env=q(env), save=set_env_script(cfg, "MM_TOKEN"),
+           health=health_script(cfg))
+
+
+def cmd_set_token(cfg, token):
+    rc, out = ssh(cfg, set_token_script(cfg), stdin=token.encode("utf-8"))
+    print(out.strip())
+    if rc == 3:
+        raise DeployError("토큰이 Mattermost 에서 거부되어 저장하지 않았습니다(기존 토큰 유지)", 3)
+    if rc != 0:
+        raise DeployError("토큰 저장 후 봇 연결 확인 실패", 4)
+    print("토큰 교체 완료 — 이전 토큰은 Mattermost 에서 삭제해도 됩니다.")
+
+
 def join_bot_script(cfg):
     """Mattermost 컨테이너의 mmctl(로컬 모드)로 봇 계정을 팀·채널에 넣는다.
     봇 계정 생성은 mmctl 로컬 모드에서 지원되지 않아 시스템 콘솔(통합 > 봇 계정)에서 만든다."""
@@ -354,7 +407,7 @@ def main(argv=None):
         elif args.command == "logs":
             cmd_logs(cfg, args.n)
         elif args.command == "set-token":
-            cmd_set_env(cfg, "MM_TOKEN", sys.stdin.read().strip())
+            cmd_set_token(cfg, read_token())
         elif args.command == "set-env":
             key, _, value = (args.arg or "").partition("=")
             if key == "MM_TOKEN":

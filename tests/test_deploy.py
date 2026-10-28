@@ -112,6 +112,37 @@ class RemoteScriptTest(unittest.TestCase):
             self.assertEqual(env.stat().st_mode & 0o777, 0o600)
 
 
+class TokenTest(unittest.TestCase):
+    def test_read_token_validates_format(self):
+        good = "a" * 20 + "123456"
+        self.assertEqual(deploy.read_token(io.StringIO(good + "\n")), good)
+        for bad in ("", "short", "A" * 26, "a" * 27, "a" * 25 + "-"):
+            with self.assertRaises(deploy.DeployError):
+                deploy.read_token(io.StringIO(bad))
+
+    def test_read_token_tty_uses_hidden_prompt(self):
+        tty = mock.Mock()
+        tty.isatty.return_value = True
+        with mock.patch.object(deploy.getpass, "getpass", return_value="b" * 26) as gp:
+            self.assertEqual(deploy.read_token(tty), "b" * 26)
+            gp.assert_called_once()
+
+    @unittest.skipUnless(HAS_BASH, "bash 없음")
+    def test_set_token_script(self):
+        s = deploy.set_token_script(cfg())
+        p = subprocess.run(["bash", "-n"], input=s, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("/api/v4/users/me", s)
+        self.assertIn("기존 토큰을 그대로 둡니다", s)
+        self.assertIn("unset TOKEN", s)
+        self.assertNotIn('echo "$TOKEN', s)
+
+    def test_set_token_rejected_keeps_exit_3(self):
+        with mock.patch.object(deploy, "ssh", return_value=(3, "토큰 확인 실패")), \
+                mock.patch.object(deploy, "read_token", return_value="c" * 26):
+            self.assertEqual(deploy.main(["set-token"]), 3)
+
+
 class MainTest(unittest.TestCase):
     def test_token_not_via_set_env(self):
         with mock.patch.object(deploy, "ssh") as ssh:
