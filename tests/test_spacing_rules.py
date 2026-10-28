@@ -29,7 +29,7 @@ def _cid(size):
 
 
 def P(text, space_before=0.0, role=None, indent=0.0, lines=1, page_break=False, objects=None,
-      container="body", space_after=0.0, auto_numbering=None, para_pr_id=None, size=14.0, confidence=0.9):
+      container="body", space_after=0.0, auto_numbering=None, para_pr_id=None, size=14.0, confidence=0.9, font="휴먼명조"):
     """간이 문단. role 을 생략하면 비어 있지 않은 문단은 본문으로 둔다."""
     empty = not text.strip()
     role = role or ("object_anchor" if empty and objects else "empty" if empty else "body")
@@ -46,14 +46,14 @@ def P(text, space_before=0.0, role=None, indent=0.0, lines=1, page_break=False, 
         "para_format": {"para_pr_id": para_pr_id, "space_before_pt": space_before, "space_after_pt": space_after,
                         "indent_pt": indent, "left_margin_pt": 0.0, "align": "JUSTIFY",
                         "line_spacing_type": "PERCENT", "line_spacing_value": 160, "line_spacing": "160%"},
-        "char_format": {"char_pr_id": _cid(size), "font_hangul": "휴먼명조", "size_pt": size},
+        "char_format": {"char_pr_id": _cid(size), "font_hangul": font, "size_pt": size},
         "runs": [{"char_pr_id": _cid(size), "chars": len(text)}],
         "line_layout": {"line_count": lines, "lines": [{"textpos": 0, "horzpos_pt": 0.0, "horzsize_pt": 480.0}] * lines,
                         "source": "test"},
     }
 
 
-def inspection(paragraphs, app="Hancom Office Hangul", tables=None):
+def inspection(paragraphs, app="Hancom Office Hangul", tables=None, para_props=None):
     char_props = {
         "0": {"id": 0, "font_face": {"hangul": "휴먼명조"}, "size_pt": 14.0,
               "ratio": {"hangul": 100, "latin": 100}, "spacing": {"hangul": 0, "latin": 0}},
@@ -75,7 +75,7 @@ def inspection(paragraphs, app="Hancom Office Hangul", tables=None):
                 "ratio": {"hangul": 100, "latin": 100}, "spacing": {"hangul": 0, "latin": 0}})
     return {
         "schema_version": "1.0", "paragraphs": paragraphs, "tables": tables or [],
-        "format_definitions": {"char_properties": char_props},
+        "format_definitions": {"char_properties": char_props, "para_properties": para_props or {}},
         "verification": {"all_ok": True},
         "document": {"sections": []},
         "package": {"version": {"application": app}},
@@ -118,7 +118,9 @@ class SpacingTableTest(unittest.TestCase):
         self.assertEqual(bullet_above_spacing(b("ㅇ", 2), 2, SPACING)[0], 6)   # ㅇ → ㅇ
         self.assertEqual(bullet_above_spacing(b("ㅇ", 2), 3, SPACING)[0], 6)   # ㅇ → -
         self.assertEqual(bullet_above_spacing(b("-", 3), 4, SPACING)[0], 6)    # - → ․
-        for prev, cur in ((b("-", 3), 3), (b("-", 3), 2), (b("․", 4), 2), (item, 2), (None, 2)):
+        self.assertEqual(bullet_above_spacing(b("-", 3), 3, SPACING)[0], 6)    # - → - (같은 기호 반복, 2026-10-28 결정)
+        self.assertEqual(bullet_above_spacing(b("․", 4), 4, SPACING)[0], 6)    # ․ → ․
+        for prev, cur in ((b("-", 3), 2), (b("․", 4), 2), (b("․", 4), 3), (b("□", 1), 3), (item, 2), (None, 2)):
             self.assertIsNone(bullet_above_spacing(prev, cur, SPACING)[0], (prev, cur))
 
 
@@ -167,6 +169,8 @@ class RequiredCasesTest(unittest.TestCase):
         self.check_pair("ㅇ 하나", "ㅇ 둘", 6)
         self.check_pair("ㅇ 세부 항목", "- 더 세부", 6)
         self.check_pair("- 더 세부", "․ 가장 세부", 6)
+        self.check_pair("- 하나", "- 둘", 6)            # 같은 기호 반복(2026-10-28 사용자 결정)
+        self.check_pair("․ 하나", "․ 둘", 6)
         self.check_pair("□ 항목", "ㅇ 세부 항목", 6, middle=["본문 설명이다."])
 
     def test_square_after_heading_allows_15(self):
@@ -180,7 +184,7 @@ class RequiredCasesTest(unittest.TestCase):
         self.assertEqual(by_idx[2]["status"], "FAIL")   # 대제목 바로 다음이 아니면 14 만
 
     def test_bullet_transitions_without_standard_are_unknown(self):
-        for first, second in (("- 하나", "- 둘"), ("․ 하나", "․ 둘"), ("- 세부", "ㅇ 복귀"), ("1. 번호 항목", "ㅇ 기호 항목"),
+        for first, second in (("- 세부", "ㅇ 복귀"), ("․ 세부", "- 복귀"), ("1. 번호 항목", "ㅇ 기호 항목"),
                               ("□ 항목", "- 두 층위 아래")):
             by_idx, _ = spacing([P(first), P(second, 6)])
             self.assertEqual(by_idx[1]["status"], "UNKNOWN", (first, second))
@@ -304,9 +308,10 @@ class HangingIndentTest(unittest.TestCase):
         return out[(i, "둘째 줄 정렬")], res
 
     def test_width_estimate_by_char_count(self):
-        # 14pt 기준: 한글·기호·※ 1칸 = 14pt, 공백·숫자·괄호·마침표·* 0.5칸 = 7pt
+        # 14pt 기준: 한글·기호·※ 1칸 = 14pt, 공백·숫자·괄호·마침표·* 0.5칸 = 7pt.
+        # '1.'(대제목 16pt)·'가.'(중제목 15pt) 문단은 글자 크기 규칙의 목표값으로 계산한다
         cases = [("□ 항목", 21.0), ("  □ 앞 공백", 35.0), ("ㅇ 세부", 21.0), ("- 하위", 14.0),
-                 ("1) 번호", 21.0), ("가. 번호", 28.0), ("1. 번호", 21.0), ("※ 주석", 21.0), ("* 주석", 14.0)]
+                 ("1) 번호", 21.0), ("가. 번호", 30.0), ("1. 번호", 24.0), ("※ 주석", 21.0), ("* 주석", 14.0)]
         for text, width in cases:
             r, _ = self._align([P(text, indent=0)])
             self.assertEqual(r["expected"]["value"]["indent_pt"], -width, text)
@@ -388,8 +393,23 @@ class FontSizeTest(unittest.TestCase):
         self.assertTrue(any(x["op"] == "set_char_size" and x["to"] == 16 for x in res["fix_plan"]["role_based_actions"]))
 
     def test_low_confidence_is_unknown(self):
-        by_idx, _ = font_size([P("1. 대제목", role="heading_1", size=14, confidence=0.4)])
-        self.assertEqual(by_idx[0]["status"], "UNKNOWN")
+        by_idx, _ = font_size([P("보고서 제목", role="document_title", size=22, confidence=0.4), P("일반 본문", size=14, confidence=0.4)])
+        self.assertEqual([by_idx[i]["status"] for i in (0, 1)], ["UNKNOWN", "UNKNOWN"])
+
+    def test_heading_level_follows_number_form(self):
+        # 요구사항 3 용어 정의: '1.' = 대제목 16pt, '가.' = 중제목 15pt. 분류기 역할·신뢰도보다 번호 형식이 우선한다
+        by_idx, _ = font_size([P("1. 대제목", role="heading_2", size=15), P("가. 중제목", role="heading_1", size=16),
+                               P("2. 본문으로 분류된 대제목", role="body", size=14, confidence=0.4),
+                               P("금융결제원 IT기획부장", role="heading_1", size=20)])
+        self.assertEqual((by_idx[0]["status"], by_idx[0]["expected"]["value"]), ("FAIL", 16))
+        self.assertEqual((by_idx[1]["status"], by_idx[1]["expected"]["value"]), ("FAIL", 15))
+        self.assertEqual((by_idx[2]["status"], by_idx[2]["expected"]["value"]), ("FAIL", 16))
+        self.assertEqual(by_idx[2]["role"]["numbered_heading"], "heading_1")
+        self.assertEqual(by_idx[3]["status"], "UNKNOWN")          # 번호 없는 '대제목' 추정 문단은 바꾸지 않는다
+        self.assertIn("번호", by_idx[3]["unknown_reason"])
+        by_idx, _ = rule_results([P("1. 대제목", role="body", size=16), P("Ⅰ. 로마 번호", role="heading_1", size=16)], "FONT")
+        self.assertEqual(by_idx[0]["expected"]["value"], "HY헤드라인M")
+        self.assertEqual(by_idx[1]["status"], "UNKNOWN")
 
     def test_note_is_two_points_smaller_than_previous(self):
         by_idx, _ = font_size([P("본문 문장이다.", size=14), P("※ 주석", size=12), P("* 둘째 주석", size=12), P("※ 큰 주석", size=14)])
@@ -413,13 +433,75 @@ class FontSizeTest(unittest.TestCase):
         self.assertEqual([by_idx[i]["status"] for i in (0, 1, 2)], ["PASS", "PASS", "FAIL"])
         self.assertEqual(by_idx[2]["expected"]["value"], 14)
 
-    def test_undecided_and_unspecified(self):
-        by_idx, res = font_size([P("보고서 제목", role="document_title", size=22), P("일반 본문", size=14)])
-        self.assertEqual(by_idx[0]["status"], "UNKNOWN")
-        self.assertIn("표지", by_idx[0]["unknown_reason"])
-        self.assertNotIn(1, by_idx)   # 본문은 표준 미정 → 묶음 SKIP
+    def test_document_title_22_or_24_by_cover(self):
+        # 표지 판단 기준(2026-10-28 사용자 결정): '목차' 문구가 HY헤드라인M 글꼴로 있으면 별도 표지·목차 문서 → 24pt, 없으면 22pt
+        by_idx, _ = font_size([P("보고서 제목", role="document_title", size=22), P("일반 본문", size=14)])
+        self.assertEqual((by_idx[0]["status"], by_idx[0]["expected"]["value"]), ("PASS", 22))
+        self.assertIn("표지 없는", by_idx[0]["expected"]["basis"])
+        by_idx, _ = font_size([P("보고서 제목", role="document_title", size=22), P("목 차", role="toc", size=16, font="HY헤드라인M"),
+                               P("1. 개요\t1", role="toc", size=14)])
+        self.assertEqual((by_idx[0]["status"], by_idx[0]["expected"]["value"]), ("FAIL", 24))
+        self.assertIn("표지 제목", by_idx[0]["expected"]["basis"])
+        by_idx, _ = font_size([P("보고서 제목", role="document_title", size=24), P("목차", role="toc", size=16, font="휴먼명조")])
+        self.assertEqual((by_idx[0]["status"], by_idx[0]["expected"]["value"]), ("FAIL", 22))   # 휴먼명조 '목차'는 표지 근거 아님
+
+    def test_body_and_lower_bullets_are_14(self):
+        by_idx, res = font_size([P("□ 항목", size=14), P("ㅇ 세부", size=13), P("- 더 세부", size=14), P("․ 가장 세부", size=12),
+                                 P("일반 본문 문장이다.", size=12), P("1) 하위 번호 항목", size=13), P("① 원 번호 항목", size=13),
+                                 P("글상자 본문", size=12, container="textbox")])
+        self.assertEqual([by_idx[i]["status"] for i in (0, 1, 2, 3, 4)], ["PASS", "FAIL", "PASS", "FAIL", "FAIL"])
+        self.assertEqual([by_idx[i]["expected"]["value"] for i in (1, 3, 4)], [14, 14, 14])
+        self.assertEqual(by_idx[4]["expected"]["basis"], "일반 본문")
+        for i in (5, 6, 7):
+            self.assertNotIn(i, by_idx)   # 1)·① 항목, 글상자 본문은 표준 미정 → 묶음 SKIP
         skips = [r for r in res["results"] if r["rule_id"] == "FONT_SIZE" and r["status"] == "SKIP"]
-        self.assertTrue(any(1 in r["target"]["paragraph_indices"] for r in skips))
+        self.assertTrue(all(any(i in r["target"]["paragraph_indices"] for r in skips) for i in (5, 6, 7)))
+
+    def test_note_follows_fixed_size_of_previous(self):
+        # 바로 위 본문(12pt)이 14pt 로 수정될 예정이면 주석 기준도 수정 후 크기(14-2=12)로 본다
+        by_idx, _ = font_size([P("본문 문장이다.", size=12), P("※ 주석", size=10), P("* 주석 둘", size=12)])
+        self.assertEqual((by_idx[0]["status"], by_idx[0]["expected"]["value"]), ("FAIL", 14))
+        self.assertEqual((by_idx[1]["status"], by_idx[1]["expected"]["value"]), ("FAIL", 12))
+        self.assertEqual((by_idx[2]["status"], by_idx[2]["expected"]["value"]), ("PASS", 12))
+
+
+def word_break(paragraphs, para_props):
+    return rule_results(paragraphs, "WORD_BREAK", para_props=para_props)
+
+
+def _pp(pid, hangul="KEEP_WORD", latin="KEEP_WORD"):
+    return {"id": pid, "break": {"breakLatinWord": latin, "breakNonLatinWord": hangul} if hangul else None}
+
+
+class WordBreakTest(unittest.TestCase):
+    """어절 단위 줄 나눔(요구사항 1 예외). 한글 저장 HWPX 의 한글 단위 값: BREAK_WORD = 어절, KEEP_WORD = 글자(이름과 반대)."""
+
+    def test_word_unit_is_break_word_in_hancom_files(self):
+        paras = [P("어절 단위 문단", para_pr_id=1), P("글자 단위 문단", para_pr_id=2), P("영어 하이픈 문단", para_pr_id=3),
+                 P("표 셀 문단", para_pr_id=2, container="table_cell", role="table_cell"), P("정의 없는 문단", para_pr_id=9)]
+        props = {"1": _pp(1, "BREAK_WORD"), "2": _pp(2, "KEEP_WORD"), "3": _pp(3, "BREAK_WORD", "HYPHENATION"), "9": _pp(9, None)}
+        by_idx, res = word_break(paras, props)
+        self.assertEqual(by_idx[0]["status"], "PASS")
+        self.assertEqual(by_idx[0]["current"]["display"], "한글 단위 어절 / 영어 단위 단어")
+        r = by_idx[1]
+        self.assertEqual((r["status"], r["fix"]["mode"], r["current"]["display"]), ("FAIL", "auto", "한글 단위 글자 / 영어 단위 단어"))
+        a = r["fix"]["actions"][0]
+        self.assertEqual((a["op"], a["para_pr_id"], a["from"], a["to"]),
+                         ("set_para_word_break", 2, {"breakNonLatinWord": "KEEP_WORD"}, {"breakNonLatinWord": "BREAK_WORD"}))
+        self.assertEqual(by_idx[2]["fix"]["actions"][0]["to"], {"breakLatinWord": "KEEP_WORD"})
+        self.assertEqual(by_idx[3]["status"], "FAIL")                 # 표 셀 문단도 대상
+        self.assertEqual(by_idx[4]["status"], "UNKNOWN")
+        acts = [x for x in res["fix_plan"]["auto_actions"] if x["op"] == "set_para_word_break"]
+        self.assertEqual(sorted(x["para_pr_id"] for x in acts), [2, 3])
+        self.assertEqual(sorted(acts[0]["paragraphs"]), [1, 3])        # 같은 paraPr 을 쓰는 문단은 한 동작으로 묶임
+
+    def test_midword_breaks_in_saved_layout_reported(self):
+        p = P("보증보험증권으로 납부하여야 함 자기앞수표 또는", para_pr_id=2, lines=3)
+        p["line_layout"]["lines"] = [{"textpos": 0}, {"textpos": 4}, {"textpos": 17}]    # '보증보험|증권' 은 어절 중간, 17은 공백 뒤
+        by_idx, _ = word_break([p], {"2": _pp(2)})
+        self.assertIn("어절 중간에 줄이 나뉜 곳 1개", by_idx[0]["observation"])
+        by_idx, _ = rule_results([p], "WORD_BREAK", para_props={"2": _pp(2)}, app="Other Editor")
+        self.assertIsNone(by_idx[0].get("observation"))                # 한글이 저장한 줄 배치가 아니면 보고하지 않음
 
 
 if __name__ == "__main__":

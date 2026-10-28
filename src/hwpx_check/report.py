@@ -15,6 +15,7 @@ OP_LABEL = {
     "set_para_line_spacing": "줄 간격 변경", "set_para_space_before": "문단 위 간격 설정",
     "set_para_hanging_indent": "내어쓰기 설정", "set_para_align": "정렬 변경", "set_page_size": "용지 크기 변경",
     "set_char_size": "글자 크기 변경", "set_page_margin": "쪽 여백 변경", "set_cell_border": "표 양단선 제거",
+    "set_para_word_break": "줄 나눔 기준 변경(어절 단위)",
 }
 
 

@@ -1,6 +1,6 @@
 {
   "_comment": "FORMAT_SPEC.md 의 표준값을 검사기가 읽는 형태로 옮긴 설정. FORMAT_SPEC.md 를 바꾸면 이 파일도 함께 바꾼다. 값이 null 이거나 키가 없는 항목은 '표준 미정'으로 처리한다.",
-  "spec_version": "FORMAT_SPEC.md (2026-10-28 개정: 추가개발 요구사항 반영 - 자간 미수정, 글자 크기, 쪽 여백 방향, 표 양단선, 항목 기호 층위 간격)",
+  "spec_version": "FORMAT_SPEC.md (2026-10-28 2차 개정: 어절 단위 줄 나눔 자동 수정, 문서 제목 22/24pt 표지 판정, 본문·ㅇ·-·․ 14pt, 같은 기호 반복 6pt)",
   "role_confidence_min": 0.6,
   "tolerance_mm": 0.5,
   "rules": {
@@ -48,9 +48,23 @@
       "footer_mm": 10.0
     },
     "WORD_BREAK": {
-      "name": "어절 단위 자간 조정",
-      "spec_mode": "분석만",
-      "spec_text": "어절이 중간에 잘려 다음 줄로 넘어가면 자간을 조정해 어절 단위로 줄이 끝나게 한다(내어쓰기 보정 후 적용). 줄바꿈 위치를 계산할 렌더링 엔진이 없어 미구현"
+      "name": "어절 단위 줄 나눔",
+      "spec_mode": "자동 수정",
+      "spec_text": "줄은 어절(공백) 단위로 끝나야 한다(요구사항 1 예외: 어절이 중간에 잘려 다음 줄로 넘어가지 않게 함). 문단 모양의 줄 나눔 기준을 한글 단위 '어절', 영어 단위 '단어'로 설정한다",
+      "hangul_attr": "breakNonLatinWord",
+      "hangul_word_unit_value": "BREAK_WORD",
+      "hangul_value_labels": {
+        "BREAK_WORD": "어절",
+        "KEEP_WORD": "글자"
+      },
+      "latin_attr": "breakLatinWord",
+      "latin_word_unit_value": "KEEP_WORD",
+      "latin_value_labels": {
+        "KEEP_WORD": "단어",
+        "HYPHENATION": "하이픈",
+        "BREAK_WORD": "글자"
+      },
+      "_comment": "한글(Hancom Office Hangul)이 저장한 HWPX 는 hh:breakSetting@breakNonLatinWord 의 값 이름이 동작과 반대다: BREAK_WORD = 한글 단위 '어절', KEEP_WORD = '글자'. 근거(2026-10-28, docs/HWPX_STRUCTURE.md 2장): (1) 샘플 test1(한글 10 저장)의 KEEP_WORD·양쪽 정렬 문단 14개의 줄 배치 캐시에서 한글 어절 중간에 줄이 나뉜 곳 5개 관측, (2) 한컴 도움말 '왼쪽·오른쪽·가운데 정렬을 선택하면 한글 단위를 자동으로 어절로 바꿈' - 샘플 두 문서의 비양쪽 정렬 paraPr 10개가 모두 BREAK_WORD, 양쪽 정렬 66·67개가 모두 KEEP_WORD, (3) 외부 구현(alio-mcp README, HwpForge)도 같은 반전을 기록. 영어 단위(breakLatinWord)는 이름대로 KEEP_WORD = 단어. 줄 나눔·양쪽 정렬의 공백 조정은 한글이 문서를 열 때 다시 계산한다(수정본은 한글에서 열어 확인)."
     },
     "FONT": {
       "name": "글꼴",
@@ -75,25 +89,39 @@
     "FONT_SIZE": {
       "name": "글자 크기",
       "spec_mode": "분석 후 수정",
-      "spec_text": "대제목 16pt, 중제목 15pt, 목차 제목 16pt·목차 항목 14pt, □ 항목 14pt(대제목 바로 다음 □ 는 15pt 허용), 참고·주석(*·※)은 바로 위 문장보다 2pt 작게",
+      "spec_text": "대제목 16pt, 중제목 15pt, 문서 제목 22pt(별도 표지·목차가 있으면 표지 제목 24pt), 목차 제목 16pt·목차 항목 14pt, 항목 기호 □·ㅇ·-·․ 와 일반 본문 14pt(대제목 바로 다음 □ 는 15pt 허용), 참고·주석(*·※)은 바로 위 문장보다 2pt 작게",
       "by_role": {
         "heading_1": 16,
-        "heading_2": 15
+        "heading_2": 15,
+        "body": 14
+      },
+      "document_title_pt": {
+        "without_cover": 22,
+        "with_cover": 24
+      },
+      "cover_detection": {
+        "toc_heading_texts": [
+          "목차",
+          "차례"
+        ],
+        "font": "HY헤드라인M",
+        "_comment": "2026-10-28 사용자 결정: 별도 표지가 있는 문서에는 '목차'라는 단어가 HY헤드라인M 글꼴로 들어간다. 공백을 뺀 문단 전체가 목차 문구이고 대표 한글 글꼴이 HY헤드라인M 이면 표지·목차 문서로 본다."
       },
       "toc_heading_pt": 16,
       "toc_entry_pt": 14,
       "bullet_pt": {
-        "□": 14
+        "□": 14,
+        "ㅇ": 14,
+        "-": 14,
+        "․": 14
       },
       "bullet_after_heading_1_allowed_pt": {
         "□": 15
       },
       "note_relative_pt": -2,
       "tolerance_pt": 0.05,
-      "undecided_roles": {
-        "document_title": "본문 상단 문서 제목은 22pt, 표지 제목은 24pt(일자 18pt·부서명 20pt)인데 표지 여부를 판별할 기준이 미확정(FORMAT_SPEC 6)"
-      },
-      "_comment": "본문(일반 본문, ㅇ·-·․ 항목, 1)·가)·①·㉮ 항목, 표 내부, 소제목)의 글자 크기 표준은 요구사항에 없어 '표준 미정'으로 둔다. 주석은 바로 위(주석이 아닌) 문단의 대표 글자 크기 기준."
+      "undecided_roles": {},
+      "_comment": "일반 본문은 본문 최상위의 번호·기호 없는 본문 문단(계층 kind=body)만 14pt 대상. 1)·가)·①·㉮ 항목, 표 내부, 소제목, 글상자 안 본문, 표지의 일자·부서명 글자 크기 표준은 아직 없어 '표준 미정'으로 둔다. 주석은 바로 위(주석이 아닌) 문단의 글자 크기(이 규칙이 바꿀 예정이면 그 목표값) 기준."
     },
     "CHAR_RATIO": {
       "name": "장평",
@@ -149,7 +177,7 @@
     "PARA_SPACING": {
       "name": "문단 간 간격",
       "spec_mode": "분석 후 수정",
-      "spec_text": "항목 번호 위: 1.(대제목) 20pt, 가.(중제목) 16pt, 1)·가)·①·㉮ 14pt. 항목 기호: □ 위 14pt(대제목 바로 다음 □ 는 15pt 도 허용), □→ㅇ·ㅇ→ㅇ·ㅇ→-·-→․ 6pt. 참고·주석 위 6pt. 일반 본문 위 6pt. TYPE A/B 특례(20pt/0pt). 뒤 문단의 문단 위 간격으로 적용",
+      "spec_text": "항목 번호 위: 1.(대제목) 20pt, 가.(중제목) 16pt, 1)·가)·①·㉮ 14pt. 항목 기호: □ 위 14pt(대제목 바로 다음 □ 는 15pt 도 허용), 한 층위 아래(□→ㅇ·ㅇ→-·-→․)와 같은 기호 반복(ㅇ→ㅇ·-→-·․→․) 6pt. 참고·주석 위 6pt. 일반 본문 위 6pt. TYPE A/B 특례(20pt/0pt). 뒤 문단의 문단 위 간격으로 적용",
       "item_above_pt": {
         "1": 20,
         "2": 16,
@@ -167,10 +195,12 @@
         15
       ],
       "bullet_same_level_pt": {
-        "ㅇ": 6
+        "ㅇ": 6,
+        "-": 6,
+        "․": 6
       },
       "bullet_one_level_down_pt": 6,
-      "bullet_undecided": "-→-, ․→․ 같은 기호 반복, 하위 기호에서 ㅇ·-로 복귀, 번호 항목 바로 다음 ㅇ·-·․ 의 간격은 미정(2026-10-28 사용자 결정 범위 밖)",
+      "bullet_undecided": "하위 기호에서 ㅇ·-로 복귀(-→ㅇ, ․→- 등), 두 층위 이상 건너뜀(□→-), 번호 항목 바로 다음 ㅇ·-·․ 의 간격은 미정(2026-10-28 사용자 결정 범위 밖. 같은 기호 반복은 6pt 로 확정)",
       "note_markers": [
         "*",
         "※"

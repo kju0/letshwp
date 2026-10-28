@@ -372,5 +372,8 @@ def summarize_para(pp):
         "right_margin_pt": m.get("right_pt"),
         "heading_type": (pp.get("heading") or {}).get("type"),
         "heading_level": (pp.get("heading") or {}).get("level"),
+        # 줄 나눔 기준(hh:breakSetting). 한글 저장 파일은 한글 단위의 값 이름이 동작과 반대(BREAK_WORD=어절, KEEP_WORD=글자)
+        "break_hangul": (pp.get("break") or {}).get("breakNonLatinWord"),
+        "break_latin": (pp.get("break") or {}).get("breakLatinWord"),
         "value_source": pp.get("margin_source"),
     }

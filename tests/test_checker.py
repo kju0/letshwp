@@ -81,7 +81,9 @@ class CheckerFixtureTest(unittest.TestCase):
         self.assertEqual((r["current"]["value"], r["expected"]["value"]), ("휴먼명조", "휴먼명조"))
         self.assertEqual(one(self.results, "LINE_SPACING", BODY1[:10])["status"], "PASS")
         self.assertEqual(one(self.results, "PAGE_MARGIN")["status"], "PASS")
-        self.assertEqual(one(self.results, "FONT_SIZE", "※ 자료")["status"], "PASS")   # 바로 위 12pt - 2
+        note = one(self.results, "FONT_SIZE", "※ 자료")
+        self.assertEqual((note["status"], note["expected"]["value"]), ("FAIL", 12))   # 바로 위 본문은 14pt 로 수정될 예정 → 14 - 2
+        self.assertEqual(one(self.results, "FONT_SIZE", BODY1[:10])["expected"]["value"], 14)   # 일반 본문 14pt
 
     # 2. 표준값과 다름 -> FAIL (+ 수정 동작)
     def test_fail_when_differs(self):
@@ -94,7 +96,7 @@ class CheckerFixtureTest(unittest.TestCase):
         self.assertEqual((a["op"], a["from"], a["to"], a["target_font_registered"]),
                          ("set_char_font", "휴먼명조", "HY헤드라인M", True))
         size = one(self.results, "FONT_SIZE", "1. 현황")
-        self.assertEqual((size["status"], size["current"]["value"], size["expected"]["value"]), ("FAIL", 12.0, 15))
+        self.assertEqual((size["status"], size["current"]["value"], size["expected"]["value"]), ("FAIL", 12.0, 16))   # '1.' = 대제목
         self.assertEqual(size["fix"]["actions"][0]["op"], "set_char_size")
         border = one(self.results, "TABLE_SIDE_BORDER")
         self.assertEqual((border["status"], border["target"]["table_id"], border["fix"]["mode"]), ("FAIL", "T0", "auto"))
@@ -127,8 +129,10 @@ class CheckerFixtureTest(unittest.TestCase):
     # 5. 표준값 미확정 -> UNKNOWN/SKIP
     def test_undecided_standard(self):
         title = one(self.results, "FONT_SIZE", "보고서 제목")
-        self.assertEqual(title["status"], "UNKNOWN")
-        self.assertIn("표지", title["unknown_reason"])
+        self.assertEqual((title["status"], title["expected"]["value"]), ("FAIL", 22))   # '목차'(HY헤드라인M) 없음 → 표지 없는 문서
+        ins = copy.deepcopy(self.inspection)
+        para(ins, "기타").update(text="목 차", char_format=dict(para(ins, "기타")["char_format"], font_hangul="HY헤드라인M"))
+        self.assertEqual(one(self.check(ins), "FONT_SIZE", "보고서 제목")["expected"]["value"], 24)
         self.assertEqual(one(self.results, "FONT", "보고서 제목")["status"], "PASS")   # 문서 제목 글꼴은 HY헤드라인M 으로 확정
         self.assertEqual(one(self.results, "PAPER_SIZE")["status"], "UNKNOWN")        # 용지는 판정 대상 아님
         self.assertEqual(one(self.results, "CHAR_SPACING")["status"], "SKIP")         # 자간은 수정하지 않음
@@ -136,8 +140,8 @@ class CheckerFixtureTest(unittest.TestCase):
     def test_font_other_elements_are_human_myeongjo(self):
         # 개정 명세: 소제목 및 기타 요소(표 내부·머리말 등)는 휴먼명조
         ins = copy.deepcopy(self.inspection)
-        para(ins, "1. 현황")["role"].update(role="heading_3", label="소제목")
-        r = one(self.check(ins), "FONT", "1. 현황")
+        para(ins, "기타")["role"].update(role="heading_3", label="소제목", confidence=0.9)
+        r = one(self.check(ins), "FONT", "기타")
         self.assertEqual((r["status"], r["expected"]["value"]), ("PASS", "휴먼명조"))
         cell = one(self.results, "FONT", "2024")
         self.assertEqual((cell["status"], cell["current"]["value"], cell["expected"]["value"]),
@@ -160,16 +164,23 @@ class CheckerFixtureTest(unittest.TestCase):
 
     # 6. 검사 제외
     def test_skip_items(self):
-        self.assertEqual(one(self.results, "WORD_BREAK")["status"], "SKIP")
         skips = find(self.results, "LINE_SPACING", status="SKIP")
         groups = {tuple(r["role"]["roles"]) for r in skips}
         self.assertIn(("머리말·꼬리말",), groups)
-        self.assertIn(("대제목",), groups)
+        self.assertIn(("중제목",), groups)   # '1. 현황'(번호 형식상 대제목)의 줄 간격은 표준 없음
         spacing_skips = find(self.results, "PARA_SPACING", status="SKIP")
         self.assertTrue(any("본문 최상위 문단이 아님" in r["unknown_reason"] for r in spacing_skips))
         for r in skips + spacing_skips:
             self.assertEqual(r["target"]["type"], "paragraph_group")
             self.assertTrue(r["unknown_reason"])
+
+    # 6-2. 어절 단위 줄 나눔(자동 수정): 한글 저장값은 BREAK_WORD = 어절
+    def test_word_break(self):
+        body = one(self.results, "WORD_BREAK", BODY1[:10])
+        self.assertEqual((body["status"], body["fix"]["mode"], body["current"]["value"]["breakNonLatinWord"]), ("FAIL", "auto", "KEEP_WORD"))
+        self.assertEqual(body["fix"]["actions"][0]["to"], {"breakNonLatinWord": "BREAK_WORD"})
+        self.assertEqual(one(self.results, "WORD_BREAK", "2024")["status"], "PASS")        # 표 셀 paraPr 4 는 어절(BREAK_WORD)
+        self.assertEqual(one(self.results, "WORD_BREAK", "머리말 문구")["status"], "FAIL")   # 머리말 문단도 대상
 
     # 7. 문단별로 다른 기준
     def test_role_dependent_standards(self):
@@ -180,7 +191,10 @@ class CheckerFixtureTest(unittest.TestCase):
         self.assertEqual((cell["status"], cell["expected"]["value"]["value"]), ("FAIL", 160))   # 표 셀 내부 160% 유지
         cap = one(self.results, "LINE_SPACING", "<표 1>")
         self.assertEqual((cap["status"], cap["expected"]["value"]["value"]), ("FAIL", 110))
-        self.assertEqual(one(self.results, "FONT", "Ⅰ.")["expected"]["value"], "HY헤드라인M")
+        roman = one(self.results, "FONT", "Ⅰ.")
+        self.assertEqual(roman["status"], "UNKNOWN")                                        # 'Ⅰ.' 은 1./가. 형식이 아님
+        self.assertIn("번호", roman["unknown_reason"])
+        self.assertEqual(one(self.results, "FONT", "1. 현황")["expected"]["value"], "HY헤드라인M")
         self.assertEqual(one(self.results, "PARA_ALIGN", "연도별")["status"], "PASS")       # 표 셀 가운데
         self.assertEqual(one(self.results, "PARA_ALIGN", "2024")["status"], "PASS")        # 숫자 셀 가운데 허용
         ins = copy.deepcopy(self.inspection)

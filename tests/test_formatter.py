@@ -108,6 +108,14 @@ class OpsTest(unittest.TestCase):
         self.assertEqual(out, b'<hp:pagePr width="59528" height="84188"><hp:margin header="2834" footer="2834" left="5669" right="5669" top="5669" bottom="2834"/></hp:pagePr>')
         self.assertEqual((ops.mm_to_hwpunit(15), ops.mm_to_hwpunit(20)), (4251, 5669))   # 한글 저장값과 일치
 
+    def test_word_break(self):
+        data = (b'<hh:paraPr id="7"><hh:breakSetting breakLatinWord="HYPHENATION" breakNonLatinWord="KEEP_WORD" '
+                b'widowOrphan="0" lineWrap="BREAK"/></hh:paraPr>')
+        out = _apply(ops.op_set_para_word_break, data, {"to": {"breakNonLatinWord": "BREAK_WORD", "breakLatinWord": "KEEP_WORD"}})
+        self.assertIn(b'breakLatinWord="KEEP_WORD" breakNonLatinWord="BREAK_WORD" widowOrphan="0"', out)
+        with self.assertRaises(ops.OpNotApplicable):
+            _apply(ops.op_set_para_word_break, b'<hh:paraPr id="7"/>', {"to": {"breakNonLatinWord": "BREAK_WORD"}})
+
     def test_char_size(self):
         data = b'<hh:charPr id="3" height="1200"><hh:fontRef hangul="0"/></hh:charPr>'
         self.assertEqual(_apply(ops.op_set_char_size, data, {"to": 15}), b'<hh:charPr id="3" height="1500"><hh:fontRef hangul="0"/></hh:charPr>')
@@ -245,7 +253,27 @@ class FormatHwpxTest(unittest.TestCase):
         title = next(p for p in b["paragraphs"] if p["text"].startswith("보고서 제목"))
         self.assertEqual(title["char_format"]["spacing_hangul"], -2)                      # 원래 자간 유지
         heading = next(p for p in b["paragraphs"] if p["text"].startswith("1. 현황"))
-        self.assertEqual((heading["char_format"]["size_pt"], heading["char_format"]["font_hangul"]), (15.0, "HY헤드라인M"))
+        self.assertEqual((heading["char_format"]["size_pt"], heading["char_format"]["font_hangul"]), (16.0, "HY헤드라인M"))  # '1.' = 대제목
+        body = next(p for p in b["paragraphs"] if p["text"].startswith("현재 사업은"))
+        self.assertEqual(body["char_format"]["size_pt"], 14.0)                            # 일반 본문 14pt
+        note = next(p for p in b["paragraphs"] if p["text"].startswith("※ 자료"))
+        self.assertEqual(note["char_format"]["size_pt"], 12.0)                            # 수정 후 본문 14 - 2
+
+    def test_word_break_set_to_word_unit(self):
+        res = self._run()
+        self.assertTrue(res["ok"], res["errors"])
+        self.assertIn("set_para_word_break", [a["op"] for a in res["fix"]["applied"]])
+        after = json.loads((self.dir / "out" / "check_after.json").read_text(encoding="utf-8"))
+        self.assertEqual({r["status"] for r in after["results"] if r["rule_id"] == "WORD_BREAK"}, {"PASS"})
+        b = inspect_hwpx(str(res["output"]))
+        for p in b["paragraphs"]:
+            if not p["is_empty"]:
+                self.assertEqual(p["para_format"]["break_hangul"], "BREAK_WORD", p["text"][:20])   # 한글 저장값 기준 '어절'
+                self.assertEqual(p["para_format"]["break_latin"], "KEEP_WORD")
+        with zipfile.ZipFile(res["output"]) as z:
+            header = z.read("Contents/header.xml").decode("utf-8")
+        self.assertIn('breakNonLatinWord="KEEP_WORD"', header)   # 원래 정의는 그대로(복제본만 바뀜)
+        self.assertIn('breakNonLatinWord="BREAK_WORD"', header)
 
     def test_verification_failure_discards_output(self):
         fail = {"all_ok": False, "checks": [{"name": "강제 실패", "status": "FAIL", "detail": "테스트"}]}

@@ -91,6 +91,16 @@ def op_set_para_hanging_indent(data, root, a):
     return edits
 
 
+def op_set_para_word_break(data, root, a):
+    # 줄 나눔 기준 = hh:breakSetting@breakNonLatinWord(한글 단위)·@breakLatinWord(영어 단위).
+    # 한글 저장 HWPX 는 breakNonLatinWord 의 값 이름이 동작과 반대(BREAK_WORD=어절, KEEP_WORD=글자) - 값은 Checker 의 action 이 정한다.
+    edits = []
+    for el in _only(list(root.iter("breakSetting")), "hh:breakSetting"):
+        for attr, value in a["to"].items():
+            edits.append(set_attr_edit(data, el, attr, value))
+    return edits
+
+
 def op_set_char_size(data, root, a):
     # 글자 크기 = hh:charPr@height (HWPUNIT, 1pt = 100). 언어별 상대 크기(relSz)는 바꾸지 않는다
     if root.local != "charPr" or "height" not in root.attrs:
@@ -123,6 +133,7 @@ DEF_OPS = {
     "set_para_line_spacing": ("paraPr", op_set_para_line_spacing),
     "set_para_space_before": ("paraPr", op_set_para_space_before),
     "set_para_hanging_indent": ("paraPr", op_set_para_hanging_indent),
+    "set_para_word_break": ("paraPr", op_set_para_word_break),
     "set_cell_border": ("borderFill", op_set_cell_border),
 }
 

@@ -180,8 +180,8 @@ def item_above_spacing(level, cfg):
 def bullet_above_spacing(prev, cur_level, cfg, after_heading_1=False):
     """항목 기호 문단 위 간격(pt). 반환 (pt, 허용값 목록, 근거) 또는 (None, (), 미정 사유).
     prev: 직전 항목 {"kind", "level", "marker"} (일반 본문·주석은 건너뛴 값).
-    2026-10-28 사용자 결정: □ 는 앞 문단과 관계없이 14pt(대제목 바로 다음은 15pt 도 허용), ㅇ→ㅇ 6pt,
-    한 층위 아래(□→ㅇ, ㅇ→-, -→․) 6pt."""
+    2026-10-28 사용자 결정: □ 는 앞 문단과 관계없이 14pt(대제목 바로 다음은 15pt 도 허용),
+    같은 기호 반복(ㅇ→ㅇ, -→-, ․→․) 6pt, 한 층위 아래(□→ㅇ, ㅇ→-, -→․) 6pt. 복귀·건너뜀·번호 항목 다음은 미정."""
     order = cfg.get("bullet_order") or list(DEFAULT_BULLET_ORDER)
     cur = order[cur_level - 1]
     if cur_level == 1:

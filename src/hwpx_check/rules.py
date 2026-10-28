@@ -69,9 +69,28 @@ class Doc:
         # FONT_SIZE 규칙이 채우는 '수정 후 글자 크기' (문단 index -> {charPr id: pt}).
         # 내어쓰기 폭 추정은 글자 크기가 바뀔 문단에서 수정 후 크기로 계산해야 하므로 RULES 순서상 FONT_SIZE 가 먼저 돈다.
         self.font_size_targets = {}
+        self._cover = None
 
     def rule_cfg(self, rule_id):
         return self.cfg["rules"][rule_id]
+
+    def has_cover(self):
+        """별도 표지·목차가 있는 문서인지. 2026-10-28 사용자 결정: 문서에 '목차' 문구가 HY헤드라인M 글꼴로 들어가 있으면 표지 문서.
+        반환 (True, 목차 문단 index) 또는 (False, None)."""
+        if self._cover is None:
+            cfg = self.rule_cfg("FONT_SIZE").get("cover_detection") or {}
+            texts = set(cfg.get("toc_heading_texts") or ("목차", "차례"))
+            font = cfg.get("font")
+            self._cover = (False, None)
+            for p in self.paragraphs:
+                if p.get("is_empty"):
+                    continue
+                if re.sub(r"\s+", "", p.get("text") or "") not in texts:
+                    continue
+                if font is None or (p.get("char_format") or {}).get("font_hangul") == font:
+                    self._cover = (True, p["index"])
+                    break
+        return self._cover
 
     def text_paragraphs(self):
         """서식 검사 대상 문단(텍스트가 있는 문단)."""
@@ -115,11 +134,28 @@ def target_of(p):
     return t
 
 
+def numbered_heading_role(p):
+    """요구사항 3 용어 정의: 항목 번호가 '1. 2. …'로 시작하면 대제목, '가. 나. …'로 시작하면 중제목.
+    본문 최상위의 1·2단계 번호 항목(계층 분석 kind=item)이면 그 역할을, 아니면 None. 분류기 추정보다 번호 형식을 우선한다."""
+    h = p.get("hierarchy") or {}
+    if h.get("kind") == "item" and h.get("level") in (1, 2):
+        return "heading_%d" % h["level"]
+    return None
+
+
+UNNUMBERED_HEADING_REASON = "역할이 '%s'(으)로 추정되었으나 번호가 '1.'/'가.' 형식이 아님(대제목·중제목은 번호 형식으로 정의 - 요구사항 3)"
+
+
 def role_of(p):
     r = p["role"]
     out = {"role": r["role"], "label": r["label"], "confidence": r["confidence"], "source": ROLE_SOURCE}
     if r.get("unclassified_reason"):
         out["unclassified_reason"] = r["unclassified_reason"]
+    num = numbered_heading_role(p)
+    if num and num != r["role"]:
+        out["numbered_heading"] = num
+        out["note"] = "번호 형식('%s')에 따라 %s으로 판정(요구사항 3 용어 정의)" % ((p.get("hierarchy") or {}).get("marker"),
+                                                                "대제목" if num == "heading_1" else "중제목")
     return out
 
 
@@ -177,6 +213,14 @@ def gate_by_role(doc, p, rule_id):
     rc = doc.rule_cfg(rule_id)
     role = p["role"]["role"]
     by_role = rc.get("by_role") or {}
+    num = numbered_heading_role(p)
+    if num:
+        # '1.'·'가.' 번호 항목은 분류기 추정과 관계없이 대제목·중제목(요구사항 3 용어 정의)
+        if num in by_role and by_role[num] is not None:
+            return "check", by_role[num]
+        role = num
+    elif role in ("heading_1", "heading_2"):
+        return "unknown_role", UNNUMBERED_HEADING_REASON % p["role"]["label"]
     if role in STRUCTURAL_SKIP_ROLES and role not in by_role:
         return "skip", STRUCTURAL_SKIP_ROLES[role]
     if role == "unclassified":
@@ -430,10 +474,71 @@ def _mm(width_str):
     return float(m.group(1)) if m else None
 
 
+def _is_hangul_syllable(ch):
+    return 0xAC00 <= ord(ch) <= 0xD7A3
+
+
+def _midword_line_breaks(doc, p):
+    """한글이 저장한 줄 배치 캐시(linesegarray)에서 한글 어절 중간(음절과 음절 사이)에서 줄이 시작하는 횟수.
+    캐시를 신뢰할 수 없거나(작성 프로그램이 한글이 아님) 글자 위치를 텍스트에 대응시킬 수 없으면 None."""
+    ll = p.get("line_layout")
+    text = p.get("text") or ""
+    trusted, _ = _layout_trusted(doc)
+    if not ll or not trusted or ll.get("line_count", 0) < 2 or p.get("objects") or p.get("controls") \
+            or "\t" in text or "\n" in text:
+        return None
+    n = 0
+    for ln in ll["lines"][1:]:
+        tp = ln.get("textpos")
+        if tp is None or tp <= 0 or tp >= len(text):
+            return None
+        if _is_hangul_syllable(text[tp - 1]) and _is_hangul_syllable(text[tp]):
+            n += 1
+    return n
+
+
 def rule_word_break(doc):
-    return [make_result(doc, "WORD_BREAK", SKIP, "어절 단위 줄바꿈용 자간 조정은 미구현(검사 범위 밖)",
-                        unknown_reason="어절이 어디서 잘리는지는 렌더링 결과이며, 내어쓰기 보정 후의 줄바꿈 위치를 계산할 렌더링 엔진이 없음(HWPX 의 linesegarray 는 수정 전 레이아웃 캐시)",
-                        needed_info="렌더링 엔진 또는 한글 자동화로 줄바꿈 위치 확인")]
+    """어절 단위 줄 나눔(요구사항 1 예외): 문단 모양 hh:breakSetting 의 줄 나눔 기준이 한글 단위 '어절', 영어 단위 '단어'인지.
+    한글 저장 HWPX 는 breakNonLatinWord 의 값 이름이 동작과 반대(BREAK_WORD=어절, KEEP_WORD=글자)다. 근거는 설정 _comment 와
+    docs/HWPX_STRUCTURE.md 참조. 줄바꿈 위치와 양쪽 정렬의 공백 조정은 한글이 문서를 열 때 다시 계산한다."""
+    rc = doc.rule_cfg("WORD_BREAK")
+    attrs = ((rc["hangul_attr"], rc["hangul_word_unit_value"], "한글 단위", rc.get("hangul_value_labels") or {}),
+             (rc["latin_attr"], rc["latin_word_unit_value"], "영어 단위", rc.get("latin_value_labels") or {}))
+    want = {a: v for a, v, _, _ in attrs}
+
+    def display(values):
+        return " / ".join("%s %s" % (label, labels.get(values.get(a), values.get(a))) for a, _, label, labels in attrs)
+
+    expected = {"value": want, "display": display(want), "basis": rc["spec_text"]}
+    results = []
+    for p in doc.text_paragraphs():
+        pf = p.get("para_format") or {}
+        pid = pf.get("para_pr_id")
+        brk = ((doc.para_props.get(str(pid)) if pid is not None else None) or {}).get("break")
+        if not brk or any(brk.get(a) is None for a in want):
+            results.append(make_result(doc, "WORD_BREAK", UNKNOWN, "문단 모양의 줄 나눔 기준(hh:breakSetting)을 추출하지 못함",
+                                       target_of(p), role_of(p), expected=expected,
+                                       unknown_reason="paraPr %s 의 breakSetting@%s 없음" % (pid, "/".join(want)),
+                                       needed_info="문단 모양 정의"))
+            continue
+        current = {"value": {a: brk[a] for a in want}, "display": display(brk),
+                   "source": VALUE_SOURCE + " - paraPr/breakSetting@%s" % ",".join(want), "refs": {"para_pr_id": pid},
+                   "role_label": p["role"]["label"]}
+        mid = _midword_line_breaks(doc, p)
+        obs = ("한글이 저장한 줄 배치에서 어절 중간에 줄이 나뉜 곳 %d개(수정본은 한글이 열 때 다시 배치)" % mid) if mid else None
+        bad = {a: brk[a] for a in want if brk[a] != want[a]}
+        if not bad:
+            results.append(make_result(doc, "WORD_BREAK", PASS, "줄 나눔 기준이 표준(%s)과 일치" % expected["display"],
+                                       target_of(p), role_of(p), current, expected, observation=obs))
+            continue
+        actions = [{"op": "set_para_word_break", "para_pr_id": pid,
+                    "xml": "Contents/header.xml hh:paraPr[@id=%s]/hh:breakSetting@%s" % (pid, ",".join(sorted(bad))),
+                    "from": bad, "to": {a: want[a] for a in bad},
+                    "note": "한글 저장 HWPX 의 breakNonLatinWord 는 값 이름이 동작과 반대(BREAK_WORD=어절, KEEP_WORD=글자). "
+                            "줄 나눔 위치가 바뀌므로 한글에서 열어 화면 배치 확인"}]
+        results.append(make_result(doc, "WORD_BREAK", FAIL, "줄 나눔 기준 %s ≠ 표준 %s" % (current["display"], expected["display"]),
+                                   target_of(p), role_of(p), current, expected, fix_actions=actions, observation=obs))
+    return results
 
 
 TOC_HEADING_TEXT = re.compile(r"^\s*(목\s*차|차\s*례|contents|table of contents)\s*$", re.I)
@@ -449,8 +554,29 @@ def _sizes_of(doc, p):
     return out
 
 
+def _body_size_decision(doc, p, by_role):
+    """'본문' 역할 문단의 글자 크기 기준. 2026-10-28 사용자 결정: 일반 본문(번호·기호 없는 본문 최상위 문단)은 14pt.
+    반환 ("check", pt, 근거) | ("unknown", 사유, 필요 정보) | ("skip", 사유)"""
+    h = p.get("hierarchy") or {}
+    kind = h.get("kind")
+    if kind == "body":
+        if p["role"]["confidence"] < doc.role_min:
+            return "unknown", "역할 신뢰도 %.2f < 기준 %.2f" % (p["role"]["confidence"], doc.role_min), "문단 역할 확정"
+        return "check", by_role["body"], "일반 본문"
+    if kind == "item":
+        return "skip", "번호 항목(%s)의 글자 크기 표준은 요구사항에 없음(1)·가)·①·㉮ 표준 미정)" % h.get("marker")
+    if kind == "unmapped_item":
+        return "skip", "표준 체계에 없는 번호·기호('%s') 항목의 글자 크기 기준 없음" % h.get("marker")
+    if kind == "bullet":
+        return "skip", "'%s' 기호 항목의 글자 크기 표준은 요구사항에 없음" % h.get("marker")
+    if kind == "out_of_scope":
+        return "skip", "본문 영역 밖(글상자 등)의 본문 문단 - 일반 본문 14pt 기준은 본문 최상위 문단에만 적용"
+    return "skip", "번호·기호 없는 본문 문단이 아니어서 일반 본문 기준을 적용할 수 없음"
+
+
 def rule_font_size(doc):
-    """역할별 글자 크기(요구사항 3·4·5). 주석은 바로 위(주석 아닌) 문단보다 2pt 작게, □ 항목 14pt(대제목 바로 다음은 15pt 허용)."""
+    """역할별 글자 크기(요구사항 3·4·5). 주석은 바로 위(주석 아닌) 문단보다 2pt 작게(그 문단이 수정될 예정이면 수정 후 크기 기준),
+    항목 기호 □·ㅇ·-·․ 와 일반 본문 14pt(대제목 바로 다음 □ 는 15pt 허용), 문서 제목은 표지 유무('목차' HY헤드라인M)로 22/24pt."""
     rc = doc.rule_cfg("FONT_SIZE")
     tol = rc.get("tolerance_pt", 0.05)
     by_role = rc.get("by_role") or {}
@@ -458,8 +584,9 @@ def rule_font_size(doc):
     note_markers = tuple(doc.rule_cfg("PARA_SPACING").get("note_markers") or ("*", "※"))
     bullet_pt = rc.get("bullet_pt") or {}
     bullet_after_h1 = rc.get("bullet_after_heading_1_allowed_pt") or {}
+    title_pt = rc.get("document_title_pt") or {}
     results, skipped = [], []
-    last_size = {}   # (영역, 표) -> 직전(주석 아닌) 문단의 대표 글자 크기
+    last_size = {}   # (영역, 표) -> 직전(주석 아닌) 문단의 대표 글자 크기(이 규칙이 바꿀 예정이면 목표값)
     for p in doc.paragraphs:
         if p.get("is_empty") or p["role"]["role"] in EXCLUDED_ROLES:
             continue
@@ -500,8 +627,38 @@ def rule_font_size(doc):
             if prev_h.get("kind") == "item" and prev_h.get("level") == 1 and h["marker"] in bullet_after_h1:
                 allowed = (bullet_after_h1[h["marker"]],)
                 basis += " (대제목 #%d 바로 다음이라 %gpt 허용)" % (ps, allowed[0])
+        elif numbered_heading_role(p):
+            num = numbered_heading_role(p)
+            expected_pt = by_role.get(num)
+            basis = "%s('%s'로 시작 - 요구사항 3 용어 정의)" % ("대제목" if num == "heading_1" else "중제목", h.get("marker"))
+            if expected_pt is None:
+                unknown = ("%s 글자 크기 표준이 설정에 없음" % basis, "FORMAT_SPEC.md 의 대제목·중제목 글자 크기")
+        elif role in ("heading_1", "heading_2"):
+            unknown = (UNNUMBERED_HEADING_REASON % p["role"]["label"], "문단 역할 확정(번호 없는 제목의 글자 크기 기준)")
         elif role == "unclassified":
             unknown = ("역할 미분류: %s" % (p["role"].get("unclassified_reason") or "근거 부족"), "문단 역할 확정")
+        elif role == "document_title" and title_pt:
+            if p["role"]["confidence"] < doc.role_min:
+                unknown = ("역할 신뢰도 %.2f < 기준 %.2f" % (p["role"]["confidence"], doc.role_min), "문단 역할 확정")
+            else:
+                cover, toc_idx = doc.has_cover()
+                expected_pt = title_pt.get("with_cover" if cover else "without_cover")
+                basis = ("표지 제목 (문단 #%d '%s' 가 %s 글꼴 → 별도 표지·목차 문서)" % (
+                            toc_idx, _excerpt(doc.paragraphs[toc_idx]["text"]), (rc.get("cover_detection") or {}).get("font"))
+                         if cover else "본문 상단 문서 제목 (%s 글꼴의 '목차' 문단 없음 → 표지 없는 문서)" % (rc.get("cover_detection") or {}).get("font"))
+                if expected_pt is None:
+                    unknown = ("문서 제목 글자 크기 표준이 설정에 없음", "FORMAT_SPEC.md 의 문서 제목 글자 크기")
+        elif role == "body" and "body" in by_role:
+            decision = _body_size_decision(doc, p, by_role)
+            if decision[0] == "check":
+                expected_pt, basis = decision[1], decision[2]
+            elif decision[0] == "unknown":
+                unknown = (decision[1], decision[2])
+            else:
+                skipped.append((p, decision[1]))
+                if dominant:
+                    last_size[key] = dominant
+                continue
         elif role in by_role:
             if p["role"]["confidence"] < doc.role_min:
                 unknown = ("역할 신뢰도 %.2f < 기준 %.2f" % (p["role"]["confidence"], doc.role_min), "문단 역할 확정")
@@ -514,9 +671,9 @@ def rule_font_size(doc):
             if dominant:
                 last_size[key] = dominant
             continue
-        if not (is_note or role == "note") and dominant:
-            last_size[key] = dominant
         if unknown:
+            if not (is_note or role == "note") and dominant:
+                last_size[key] = dominant
             results.append(make_result(doc, "FONT_SIZE", UNKNOWN, "적용할 글자 크기 기준을 정할 수 없음", target_of(p), role_of(p),
                                        current, unknown_reason=unknown[0], needed_info=unknown[1]))
             continue
@@ -528,6 +685,9 @@ def rule_font_size(doc):
                     "basis": basis}
         bad = {cid: v for cid, v in sizes.items()
                if abs(v - expected_pt) > tol and not any(abs(v - a) <= tol for a in allowed)}
+        if not (is_note or role == "note") and dominant:
+            # 다음 주석의 기준은 '바로 위 문장'의 수정 후 크기: 이 문단이 수정 대상이면 목표값, 아니면 현재 대표 크기
+            last_size[key] = expected_pt if bad else dominant
         if bad:
             doc.font_size_targets[p["index"]] = {cid: expected_pt for cid in bad}
             actions = [{"op": "set_char_size", "char_pr_id": cid,

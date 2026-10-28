@@ -67,20 +67,21 @@ def _margin(indent, left, right, prev, next_):
             '<hc:next value="%d" unit="HWPUNIT"/></hh:margin>') % (indent, left, right, prev, next_)
 
 
-def _para_pr(pid, align, line, prev=0, next_=0, left=0, heading="NONE", level=0):
-    # 한글 저장 파일과 같이 hp:switch 의 case(HwpUnitChar) 값과 default 값(2배)을 함께 기록
+def _para_pr(pid, align, line, prev=0, next_=0, left=0, heading="NONE", level=0, hangul_break="KEEP_WORD"):
+    # 한글 저장 파일과 같이 hp:switch 의 case(HwpUnitChar) 값과 default 값(2배)을 함께 기록.
+    # hangul_break: 줄 나눔 기준 한글 단위. 한글 저장값은 이름과 반대(KEEP_WORD=글자, BREAK_WORD=어절)
     ls = '<hh:lineSpacing type="PERCENT" value="%d" unit="HWPUNIT"/>' % line
     return (
         '<hh:paraPr id="%d" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="1" suppressLineNumbers="0" '
         'checked="0"><hh:align horizontal="%s" vertical="BASELINE"/><hh:heading type="%s" idRef="0" level="%d"/>'
-        '<hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="KEEP_WORD" widowOrphan="0" '
+        '<hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="%s" widowOrphan="0" '
         'keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/>'
         '<hh:autoSpacing eAsianEng="0" eAsianNum="0"/>'
         '<hp:switch><hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar">%s%s</hp:case>'
         '<hp:default>%s%s</hp:default></hp:switch>'
         '<hh:border borderFillIDRef="1" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" '
         'connect="0" ignoreMargin="0"/></hh:paraPr>'
-    ) % (pid, align, heading, level, _margin(0, left, 0, prev, next_), ls,
+    ) % (pid, align, heading, level, hangul_break, _margin(0, left, 0, prev, next_), ls,
          _margin(0, left * 2, 0, prev * 2, next_ * 2), ls)
 
 
@@ -95,13 +96,13 @@ CHAR_PRS = [
     _char_pr(5, 1100, 2, ratio=95, spacing=-5),
 ]
 # paraPr: 0 본문 양쪽 160% / 1 가운데 160% / 2 대제목 문단위 10pt 아래 5pt / 3 주석 130% 왼쪽 10pt
-#         4 표 셀 가운데 110%
+#         4 표 셀 가운데 110% (줄 나눔 한글 단위 '어절' = BREAK_WORD, 나머지는 '글자' = KEEP_WORD)
 PARA_PRS = [
     _para_pr(0, "JUSTIFY", 160),
     _para_pr(1, "CENTER", 160),
     _para_pr(2, "JUSTIFY", 160, prev=1000, next_=500),
     _para_pr(3, "JUSTIFY", 130, left=1000),
-    _para_pr(4, "CENTER", 110),
+    _para_pr(4, "CENTER", 110, hangul_break="BREAK_WORD"),
     # 5: 한글 2016 형식처럼 hh:heading 을 hp:switch(2016/paragraph) 로 감싼 사례. 본문에서는 사용하지 않음
     _para_pr(5, "JUSTIFY", 160).replace(
         '<hh:heading type="NONE" idRef="0" level="0"/>',
