@@ -28,7 +28,7 @@ hwpx 파일을 첨부해서 저에게 DM 을 보내거나, 채널에서 @{bot} �
 
 | 메시지 | 동작 |
 |---|---|
-| (내용 없음) 또는 `수정` | 서식 검사 → 자동 수정 → 재검사·검증. 수정본 hwpx 와 수정 보고서를 보냅니다 |
+| (내용 없음) 또는 `수정` | 서식 검사 → 자동 수정 → 재검사·검증. 수정본 hwpx 를 보내고, 바꾼 내용과 직접 확인할 항목을 알려 드립니다 |
 | `검사` 또는 `테스트` | 서식 검사만 합니다(문서는 바꾸지 않음). 검사 보고서를 보냅니다 |
 | `A` / `B` 함께 쓰기 | 문서 유형(TYPE A/B) 특수 간격을 적용합니다. 예: `수정 A`, `검사 B` |
 | `도움말` | 이 안내 |
@@ -72,10 +72,60 @@ def safe_filename(name):
     return name or "document.hwpx"
 
 
-def truncate(text, limit):
+def truncate(text, limit, note="…(길어서 여기까지만 표시합니다.)"):
     if len(text) <= limit:
         return text
-    return text[:limit].rstrip() + "\n\n…(길어서 여기까지만 표시합니다. 전체 내용은 첨부 파일을 확인해 주세요.)"
+    return text[:limit].rstrip() + "\n\n" + note
+
+
+def md_sections(md):
+    """마크다운을 '## ' 제목 기준으로 나눈다 → [(제목, [본문 줄])]. 첫 제목 앞 부분은 제목 ''."""
+    out = [("", [])]
+    for line in md.splitlines():
+        if line.startswith("## "):
+            out.append((line[3:].strip(), []))
+        else:
+            out[-1][1].append(line)
+    return out
+
+
+def _section(sections, prefix):
+    for title, body in sections:
+        if title.startswith(prefix):
+            return [l for l in body]
+    return []
+
+
+def fix_message(filename, report_md, limit=MAX_MESSAGE_CHARS):
+    """수정 보고서(change_report.md)에서 채팅용 메시지를 만든다.
+    수정한 내용(2절)과 직접 확인이 필요한 항목(4절)만 옮기고, 검증 통과·적합 집계는 싣지 않는다."""
+    secs = md_sections(report_md)
+    changes = _section(secs, "2.")
+    rules = [l for l in changes if l.startswith("### ")]
+    count = sum(int(m.group(1)) for m in (re.search(r"— (\d+)건", l) for l in rules) if m)
+    manual = _section(secs, "4.")
+    has_manual = any(l.startswith("### ") for l in manual)
+    caution = [l for l in _section(secs, "6.") if "줄 나눔" in l]
+
+    head = ("**서식 수정 완료** — `%s` (수정 %d건)" % (filename, count) if count
+            else "**서식 수정 완료** — `%s` (표준과 다른 서식이 없어 바꾼 것이 없습니다)" % filename)
+
+    def compose(detail):
+        parts = [head, ""]
+        if count:
+            parts += detail
+        if has_manual:
+            parts += ["", "#### 직접 확인 필요"] + [l.replace("### ", "##### ", 1) if l.startswith("### ") else l
+                                                   for l in manual]
+        if count:
+            parts += [""] + caution
+        return re.sub(r"\n{3,}", "\n\n", "\n".join(parts)).strip() + "\n"
+
+    msg = compose([l.replace("### ", "#### ", 1) if l.startswith("### ") else l for l in changes])
+    if len(msg) > limit:
+        # 위치별 표가 너무 길면 항목별 건수만 싣는다
+        msg = compose(["- %s" % l[4:] for l in rules] + ["", "_(수정 위치가 많아 항목별 건수만 표시합니다.)_"])
+    return truncate(msg, limit)
 
 
 def summary_line(label, s):
@@ -104,45 +154,38 @@ def run_runner(mode, hwpx_path, doc_type, out_root, timeout=600):
 
 
 def build_reply(mode, filename, returncode, output, out_dir):
-    """실행 결과 → (메시지, 첨부할 파일 경로 목록). 실행기가 만든 파일 내용만 사용한다."""
+    """실행 결과 → (메시지, 첨부할 파일 경로 목록). 실행기가 만든 파일 내용만 사용한다.
+    수정: 수정본 hwpx 하나만 첨부하고, 메시지에는 수정한 내용과 직접 확인할 항목만 싣는다.
+    검사: 검사 보고서(check_report.txt)를 첨부하고 내용을 함께 싣는다."""
     info = None
     if out_dir and (out_dir / "run_info.json").is_file():
         info = json.loads((out_dir / "run_info.json").read_text(encoding="utf-8"))
     ok = returncode == 0 and info is not None and info.get("ok")
     title = "서식 수정" if mode == MODE_FIX else "서식 검사"
-    lines = []
-    files = []
     if not ok:
-        lines.append("**%s 실패** — `%s`" % (title, filename))
+        lines = ["**%s 실패** — `%s`" % (title, filename)]
         if mode == MODE_FIX:
             lines.append("수정본을 만들지 않았습니다.")
         errors = (info or {}).get("errors") or [l for l in output.splitlines() if l.startswith(("실패", "오류"))]
         lines += ["- %s" % e for e in errors] or ["- 실행기 종료 코드 %s" % returncode]
         if info:
             lines.append("코드 버전: %s" % code_version(info))
-            files.append(out_dir / "run_info.json")
-        return "\n".join(lines), files
+        return "\n".join(lines), []
 
-    lines.append("**%s 완료** — `%s`" % (title, filename))
-    lines.append("코드 버전: %s · 원본 변경 없음: %s" % (code_version(info), "예" if info["source_unchanged"] else "아니오"))
     if mode == MODE_FIX:
-        for label, key in (("수정 전", "check_before"), ("수정 후", "check_after")):
-            if info.get(key):
-                lines.append(summary_line(label, info[key]))
-        lines.append("적용한 수정 동작: %d개, 적용 못 한 동작: %d개"
-                     % (info["applied_actions"], info["not_applied_actions"]))
         report = out_dir / "change_report.md"
-        files += [Path(info["output"]), report]
-    else:
-        if info.get("check_summary"):
-            lines.append(summary_line("", info["check_summary"]).lstrip())
-        report = out_dir / "check_report.txt"
-        files.append(report)
+        md = report.read_text(encoding="utf-8") if report.is_file() else ""
+        return fix_message(filename, md), [Path(info["output"])]
+
+    lines = ["**%s 완료** — `%s`" % (title, filename),
+             "코드 버전: %s · 원본 변경 없음: %s" % (code_version(info), "예" if info["source_unchanged"] else "아니오")]
+    if info.get("check_summary"):
+        lines.append(summary_line("", info["check_summary"]).lstrip())
+    report = out_dir / "check_report.txt"
     head = "\n".join(lines) + "\n\n---\n"
-    body = report.read_text(encoding="utf-8") if report.is_file() else ""
-    if mode == MODE_TEST:
-        body = "```\n" + body + "\n```"
-    return head + truncate(body, MAX_MESSAGE_CHARS - len(head) - 100), files
+    body = "```\n" + (report.read_text(encoding="utf-8") if report.is_file() else "") + "\n```"
+    return head + truncate(body, MAX_MESSAGE_CHARS - len(head) - 100,
+                           "…(길어서 여기까지만 표시합니다. 전체 내용은 첨부 파일을 확인해 주세요.)"), [report]
 
 
 def save_attachment(data_dir, post_id, filename, content, now=None):

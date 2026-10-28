@@ -283,17 +283,22 @@ class BotFlowTest(unittest.TestCase):
     def post(self, message, file_ids):
         return {"id": "post1", "root_id": "", "channel_id": "c1", "message": message, "file_ids": file_ids}
 
-    def test_fix_flow_replies_with_fixed_file_and_report(self):
+    def test_fix_flow_replies_with_fixed_file_only(self):
         self.bot.on_post(self.post("@letshwp 수정", ["f1", "f2"]))
         self.assertIn("접수했습니다", self.client.posts[0]["message"])
         self.drain()
         last = self.client.posts[-1]
         self.assertEqual(last["root_id"], "post1")
-        self.assertIn("**서식 수정 완료** — `보고서.hwpx`", last["message"])
-        self.assertIn("수정 후 검사: 총", last["message"])
-        self.assertEqual(self.client.uploaded, ["보고서_수정본.hwpx", "change_report.md"])
-        report = next((self.dir / "data" / "output").glob("*_수정")) / "change_report.md"
-        self.assertIn(report.read_text(encoding="utf-8")[:200], last["message"])
+        self.assertRegex(last["message"], r"^\*\*서식 수정 완료\*\* — `보고서.hwpx` \(수정 \d+건\)")
+        # 수정본 hwpx 하나만 첨부한다
+        self.assertEqual(self.client.uploaded, ["보고서_수정본.hwpx"])
+        # 검증 통과·적합 집계·코드 버전은 싣지 않는다
+        for word in ("검증", "통과", "PASS", "적합", "코드 버전", "원본 변경"):
+            self.assertNotIn(word, last["message"])
+        # 수정한 내용은 보고서 2절 그대로 옮긴다
+        report = (next((self.dir / "data" / "output").glob("*_수정")) / "change_report.md").read_text(encoding="utf-8")
+        first_row = next(l for l in report.split("## 2.")[1].splitlines() if l.startswith("| 문단"))
+        self.assertIn(first_row, last["message"])
         # 원본 첨부는 data/inbox 에 그대로 보관된다
         saved = next((self.dir / "data" / "inbox").glob("*/보고서.hwpx"))
         self.assertEqual(saved.read_bytes(), self.data)
@@ -326,12 +331,91 @@ class BotFlowTest(unittest.TestCase):
         self.drain()
         last = self.client.posts[-1]
         self.assertIn("실패", last["message"])
-        self.assertNotIn("보고서_수정본.hwpx", self.client.uploaded)
+        self.assertEqual(self.client.uploaded, [])
 
     def test_status_file(self):
         self.bot.write_status(connected=True)
         st = json.loads((self.dir / "data" / "status.json").read_text(encoding="utf-8"))
         self.assertTrue(st["connected"])
+
+
+REPORT_MD = """# 서식 수정 보고서
+
+> ✅ **수정 완료 · 검증 통과** — 수정본: `a_수정본.hwpx`
+
+## 1. 한눈에 보기
+
+| 구분 | 수정 전 | 수정 후 |
+|---|---|---|
+| 적합 | 1 | 3 |
+
+## 2. 수정한 내용
+
+### 자간 — 2건
+
+| 위치 | 내용 | 변경 전 | 변경 후 |
+|---|---|---|---|
+| 문단 #1 (sec0/p0) | 가 | -4% | 0% |
+| 문단 #2 (sec0/p1) | 나 | -4% | 0% |
+
+## 3. 검증 결과
+
+| 검증 항목 | 결과 | 상세 |
+|---|---|---|
+| 패키지 | ✅ 통과 | ok |
+
+## 4. 수정하지 않은 항목 (직접 확인 필요)
+
+{manual}
+- 판단 불가 1건·검사 제외 0건은 기준이 정해지지 않았거나 역할이 불확실해 수정하지 않았습니다(검사 보고서 ④절).
+
+## 5. 항목별 재검사 비교
+
+| 검사 항목 | 수정 필요 | 적합 | 판단 불가 |
+|---|---|---|---|
+| 자간 | 2 → 0 | 1 → 3 | 0 → 0 |
+
+## 6. 참고
+
+- 원본 파일은 열기만 했고, 수정은 복사본에만 적용했습니다.
+- 자간·줄 간격·문단 간격이 바뀌면 줄 나눔과 쪽 나눔이 달라질 수 있습니다. 한글에서 열어 화면 배치를 확인하세요.
+"""
+
+MANUAL = """### 검사만 하는 항목 — 본문 글자를 바꿔야 하므로 자동 수정하지 않음
+
+| 항목 | 위치 | 내용 | 현재 | 표준 |
+|---|---|---|---|---|
+| 날짜 | 문단 #3 (sec0/p2) | 2026.1.1 | 2026.1.1 | 2026. 1. 1. |
+"""
+
+
+class FixMessageTest(unittest.TestCase):
+    def test_changes_only_no_pass_info(self):
+        m = handler.fix_message("a.hwpx", REPORT_MD.format(manual="없습니다.\n"))
+        self.assertTrue(m.startswith("**서식 수정 완료** — `a.hwpx` (수정 2건)"))
+        self.assertIn("#### 자간 — 2건", m)
+        self.assertIn("| 문단 #2 (sec0/p1) | 나 | -4% | 0% |", m)
+        self.assertIn("줄 나눔과 쪽 나눔", m)
+        for word in ("검증", "통과", "적합", "한눈에", "재검사", "직접 확인", "판단 불가", "원본 파일은"):
+            self.assertNotIn(word, m)
+        self.assertNotIn("\n\n\n", m)
+
+    def test_manual_review_kept(self):
+        m = handler.fix_message("a.hwpx", REPORT_MD.format(manual=MANUAL))
+        self.assertIn("#### 직접 확인 필요", m)
+        self.assertIn("| 날짜 | 문단 #3 (sec0/p2) | 2026.1.1 | 2026.1.1 | 2026. 1. 1. |", m)
+
+    def test_long_report_falls_back_to_counts(self):
+        m = handler.fix_message("a.hwpx", REPORT_MD.format(manual="없습니다.\n"), limit=200)
+        self.assertIn("- 자간 — 2건", m)
+        self.assertNotIn("| 문단 #1", m)
+        self.assertIn("항목별 건수만", m)
+
+    def test_nothing_changed(self):
+        md = REPORT_MD.format(manual="없습니다.\n").split("## 2.")[0] + "## 2. 수정한 내용\n\n수정한 항목이 없습니다.\n"
+        m = handler.fix_message("a.hwpx", md)
+        self.assertIn("바꾼 것이 없습니다", m)
+        self.assertNotIn("줄 나눔", m)
 
 
 class HandlerMiscTest(unittest.TestCase):
