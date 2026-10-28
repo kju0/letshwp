@@ -46,6 +46,18 @@ OWPML(KS X 6101) 요소 의미를 대조한 결과다. 분석 엔진(`src/hwpx_a
   판단: `hp:switch` 는 "이해하는 첫 case 를 쓰고 없으면 default" 규칙이며 한글은 HwpUnitChar 를 지원하므로 case 값이
   화면에 적용되는 값이다. 한글 기본 '본문' 스타일 왼쪽 여백 15pt 가 case 값 1500 과 일치(s1 paraPr 2)하는 것으로 교차 확인.
   → 분석기는 case 를 채택하고 default 원값을 `margin_switch_default_raw` 로 병기한다.
+- `hh:breakSetting` 줄 나눔 기준: `@breakLatinWord`(영어 단위: KEEP_WORD=단어, HYPHENATION=하이픈, BREAK_WORD=글자),
+  `@breakNonLatinWord`(한글 단위). **한글이 저장한 파일은 한글 단위의 값 이름이 동작과 반대다: `BREAK_WORD` = 어절, `KEEP_WORD` = 글자.**
+  근거(2026-10-28):
+  1. test1(한글 10 Windows 저장, linesegarray 있음)의 `KEEP_WORD`·양쪽 정렬 문단 14개(두 줄 이상)의 줄 시작 위치(textpos) 19곳 중
+     한글 어절 중간(음절|음절) 5곳 — '보증보험|증권으로', '인정|하지', '공공기관|의', '공동|수급', '거래실|례가'. 어절 단위라면 생길 수 없는 위치.
+  2. 한컴 도움말(문단 정렬 방식): "왼쪽·오른쪽·가운데 정렬을 선택하면 한글의 줄 바꿈 기준을 자동으로 '어절'로 바꾼다."
+     test1·test3 의 paraPr 전수에서 양쪽 정렬이 아닌 10개(CENTER 7·LEFT 1·RIGHT 2)는 모두 `BREAK_WORD`, 양쪽 정렬 66·67개는 모두 `KEEP_WORD`.
+  3. 외부 구현도 같은 반전을 기록: alio-mcp README("BREAK_WORD 가 어절, KEEP_WORD 가 글자 단위(한글 저장본 기준)"),
+     HwpForge 인코더(비라틴 라벨을 반대로 저장), rigorloom(KEEP_WORD 문단의 줄 끝 34%가 어절 중간).
+  → Formatter 는 어절 단위를 위해 `breakNonLatinWord="BREAK_WORD"`, 영어 단위 단어는 `breakLatinWord="KEEP_WORD"` 로 설정한다.
+  라틴 단위는 이름대로 동작한다(rigorloom 말뭉치에서 두 값 모두 라틴 단어·숫자 안에서 줄이 나뉜 사례 0).
+  한글 프로그램에서 수정본을 열어 확인하는 절차는 아직 수행하지 못했다(개발 환경에 한글 없음).
 - `hp:switch` 는 한 paraPr 안에 여러 개 올 수 있고 margin 외 요소도 감싼다(5종 전수 확인):
 
   | 감싼 요소 | case required-namespace | 개수 | 의미(관측) |
