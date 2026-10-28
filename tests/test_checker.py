@@ -80,7 +80,8 @@ class CheckerFixtureTest(unittest.TestCase):
         self.assertEqual(r["status"], "PASS")
         self.assertEqual((r["current"]["value"], r["expected"]["value"]), ("휴먼명조", "휴먼명조"))
         self.assertEqual(one(self.results, "LINE_SPACING", BODY1[:10])["status"], "PASS")
-        self.assertEqual(one(self.results, "PAPER_SIZE")["status"], "PASS")
+        self.assertEqual(one(self.results, "PAGE_MARGIN")["status"], "PASS")
+        self.assertEqual(one(self.results, "FONT_SIZE", "※ 자료")["status"], "PASS")   # 바로 위 12pt - 2
 
     # 2. 표준값과 다름 -> FAIL (+ 수정 동작)
     def test_fail_when_differs(self):
@@ -92,8 +93,12 @@ class CheckerFixtureTest(unittest.TestCase):
         a = r["fix"]["actions"][0]
         self.assertEqual((a["op"], a["from"], a["to"], a["target_font_registered"]),
                          ("set_char_font", "휴먼명조", "HY헤드라인M", True))
-        sp = one(self.results, "CHAR_SPACING", "보고서 제목")
-        self.assertEqual((sp["status"], sp["current"]["value"], sp["fix"]["mode"]), ("FAIL", -2, "auto"))
+        size = one(self.results, "FONT_SIZE", "1. 현황")
+        self.assertEqual((size["status"], size["current"]["value"], size["expected"]["value"]), ("FAIL", 12.0, 15))
+        self.assertEqual(size["fix"]["actions"][0]["op"], "set_char_size")
+        border = one(self.results, "TABLE_SIDE_BORDER")
+        self.assertEqual((border["status"], border["target"]["table_id"], border["fix"]["mode"]), ("FAIL", "T0", "auto"))
+        self.assertEqual(sorted(tuple(a["sides"]) for a in border["fix"]["actions"]), [("left",), ("left", "right"), ("right",)])
 
     # 3. 분석 정보 없음 -> UNKNOWN (FAIL 아님)
     def test_unknown_when_data_missing(self):
@@ -104,7 +109,7 @@ class CheckerFixtureTest(unittest.TestCase):
         r = one(results, "LINE_SPACING", BODY1[:10])
         self.assertEqual(r["status"], "UNKNOWN")
         self.assertIn("needed_info", r)
-        self.assertEqual(one(results, "PAPER_SIZE")["status"], "UNKNOWN")
+        self.assertEqual(one(results, "PAGE_MARGIN")["status"], "UNKNOWN")
         self.assertEqual(one(results, "PAPER_ORIENTATION")["status"], "UNKNOWN")
 
     # 4. 역할 불확실 -> UNKNOWN
@@ -121,10 +126,12 @@ class CheckerFixtureTest(unittest.TestCase):
 
     # 5. 표준값 미확정 -> UNKNOWN/SKIP
     def test_undecided_standard(self):
-        self.assertEqual(one(self.results, "FONT_SIZE")["status"], "UNKNOWN")
-        title = one(self.results, "FONT", "보고서 제목")
+        title = one(self.results, "FONT_SIZE", "보고서 제목")
         self.assertEqual(title["status"], "UNKNOWN")
         self.assertIn("표지", title["unknown_reason"])
+        self.assertEqual(one(self.results, "FONT", "보고서 제목")["status"], "PASS")   # 문서 제목 글꼴은 HY헤드라인M 으로 확정
+        self.assertEqual(one(self.results, "PAPER_SIZE")["status"], "UNKNOWN")        # 용지는 판정 대상 아님
+        self.assertEqual(one(self.results, "CHAR_SPACING")["status"], "SKIP")         # 자간은 수정하지 않음
 
     def test_font_other_elements_are_human_myeongjo(self):
         # 개정 명세: 소제목 및 기타 요소(표 내부·머리말 등)는 휴먼명조
@@ -137,14 +144,19 @@ class CheckerFixtureTest(unittest.TestCase):
                          ("FAIL", "맑은 고딕", "휴먼명조"))
         self.assertEqual(one(self.results, "FONT", "머리말 문구")["status"], "PASS")
 
-    def test_analysis_only_mismatch_is_not_fail(self):
+    def test_margin_mismatch_is_fixed(self):
         ins = copy.deepcopy(self.inspection)
-        ins["document"]["sections"][0]["properties"]["page"]["margin_mm"]["header"] = 15.0
-        r = one(self.check(ins), "HEADER_FOOTER_MARGIN")
-        self.assertEqual(r["status"], "UNKNOWN")
-        self.assertEqual(r["observation"], "표준값과 다름")
+        m = ins["document"]["sections"][0]["properties"]["page"]["margin_mm"]
+        m["header"], m["top"], m["bottom"] = 15.0, 25.0, 20.0
+        results = self.check(ins)
+        r = one(results, "HEADER_FOOTER_MARGIN")
+        self.assertEqual((r["status"], r["fix"]["mode"]), ("FAIL", "auto"))
+        self.assertEqual(r["fix"]["actions"][0]["to_mm"], {"header": 10.0})
+        r = one(results, "PAGE_MARGIN")
+        self.assertEqual(r["fix"]["actions"][0]["to_mm"], {"top": 20.0, "bottom": 10.0})
         self.assertEqual(one(self.results, "HEADER_FOOTER_MARGIN")["status"], "PASS")
-        self.assertEqual(one(self.results, "PAGE_MARGIN")["status"], "UNKNOWN")
+        ins["document"]["sections"][0]["properties"]["page"]["width_mm"] = 215.9
+        self.assertEqual(one(self.check(ins), "PAPER_SIZE")["fix"]["actions"], [])   # 용지는 수정하지 않음
 
     # 6. 검사 제외
     def test_skip_items(self):
@@ -164,11 +176,20 @@ class CheckerFixtureTest(unittest.TestCase):
         self.assertEqual(one(self.results, "LINE_SPACING", BODY1[:10])["expected"]["value"]["value"], 160)
         note = one(self.results, "LINE_SPACING", "※ 자료")
         self.assertEqual((note["status"], note["expected"]["value"]["value"]), ("PASS", 130))
+        cell = one(self.results, "LINE_SPACING", "2024")
+        self.assertEqual((cell["status"], cell["expected"]["value"]["value"]), ("FAIL", 160))   # 표 셀 내부 160% 유지
         cap = one(self.results, "LINE_SPACING", "<표 1>")
         self.assertEqual((cap["status"], cap["expected"]["value"]["value"]), ("FAIL", 110))
         self.assertEqual(one(self.results, "FONT", "Ⅰ.")["expected"]["value"], "HY헤드라인M")
         self.assertEqual(one(self.results, "PARA_ALIGN", "연도별")["status"], "PASS")       # 표 셀 가운데
-        self.assertEqual(one(self.results, "PARA_ALIGN", "2024")["status"], "UNKNOWN")     # 숫자 셀
+        self.assertEqual(one(self.results, "PARA_ALIGN", "2024")["status"], "PASS")        # 숫자 셀 가운데 허용
+        ins = copy.deepcopy(self.inspection)
+        para(ins, "2024")["para_format"]["align"] = "RIGHT"
+        para(ins, "1,234")["para_format"]["align"] = "LEFT"
+        results = self.check(ins)
+        self.assertEqual(one(results, "PARA_ALIGN", "2024")["status"], "PASS")              # 숫자 셀 오른쪽은 수정 안 함
+        r = one(results, "PARA_ALIGN", "1,234")
+        self.assertEqual((r["status"], r["fix"]["actions"][0]["to"]), ("FAIL", "CENTER"))
 
     def test_text_rules_are_manual_only(self):
         for rid in ("DATE_FORMAT", "TIME_FORMAT", "ITEM_NUMBER", "ITEM_BULLET", "DOC_TITLE_BOX"):

@@ -29,8 +29,9 @@ PRESERVATION_RULES = [
     "원본 HWPX 는 수정하지 않고 복제본에만 적용한다.",
     "문단 텍스트와 숫자는 변경하지 않는다(날짜·시간·번호·기호는 자동 수정 대상에서 제외).",
     "문단 순서, 표 구조(행·열·셀 병합), 그림 등 논리 구조를 변경하지 않는다.",
-    "아래 actions 에 나열된 서식 속성(header.xml 의 charPr/paraPr, section 의 pagePr)만 변경한다.",
-    "공유되는 charPr/paraPr 를 바꿀 때 다른 문단에 영향이 가면(clone_required) 정의를 복제해 대상 문단만 다시 참조시킨다.",
+    "아래 actions 에 나열된 서식 속성(header.xml 의 charPr/paraPr/borderFill, section 의 pagePr 크기·여백)만 변경한다.",
+    "공유되는 charPr/paraPr/borderFill 을 바꿀 때는 정의를 복제해 대상 문단·셀만 다시 참조시킨다(다른 문단·셀은 그대로).",
+    "자간은 수정하지 않는다. 장평은 100% 로 유지한다. 용지 크기는 판정·수정하지 않는다.",
     "간격·서식은 목표값으로 설정하고 기존값에 더하지 않는다(같은 문서를 반복 변환해도 누적되지 않음).",
     "빈 문단은 중복 간격을 만들더라도 삭제하지 않고 보고만 한다.",
     "수정 후 Inspector 를 다시 실행해 문단 수·표 수·텍스트·표 격자 검증이 원본과 동일한지 확인하고, 실패하면 결과를 폐기한다.",
@@ -166,15 +167,21 @@ def build_fix_plan(doc, results):
             continue
         for a in r["fix"]["actions"]:
             ref = ("char_pr_id", a["char_pr_id"]) if "char_pr_id" in a else \
-                  ("para_pr_id", a["para_pr_id"]) if "para_pr_id" in a else ("section_index", a.get("section_index"))
-            key = (a["op"], ref, json.dumps(a.get("to"), ensure_ascii=False, sort_keys=True), json.dumps(a.get("langs") or a.get("lang")))
+                  ("para_pr_id", a["para_pr_id"]) if "para_pr_id" in a else \
+                  ("border_fill_id", a["border_fill_id"]) if "border_fill_id" in a else ("section_index", a.get("section_index"))
+            key = (a["op"], ref, json.dumps(a.get("to", a.get("to_mm")), ensure_ascii=False, sort_keys=True),
+                   json.dumps(a.get("langs") or a.get("lang") or a.get("sides")))
             g = grouped.get(key)
             if g is None:
                 g = dict(a, rule_id=r["rule_id"], mode=r["fix"]["mode"], result_ids=[], paragraphs=[])
                 g.pop("paragraph_index", None)
+                g.pop("cells", None)
                 grouped[key] = g
             g["result_ids"].append(r["id"])
-            if r["target"].get("paragraph_index") is not None:
+            if a.get("cells"):
+                # 표 셀 대상 동작(테두리): 문단이 아니라 셀 목록으로 적용 대상을 지정한다
+                g.setdefault("cells", []).extend(a["cells"])
+            elif r["target"].get("paragraph_index") is not None:
                 g["paragraphs"].append(r["target"]["paragraph_index"])
     actions = []
     for (op, ref, _, _), g in grouped.items():

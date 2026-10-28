@@ -14,6 +14,7 @@ OP_LABEL = {
     "set_char_font": "글꼴 변경", "set_char_ratio": "장평 변경", "set_char_spacing": "자간 변경",
     "set_para_line_spacing": "줄 간격 변경", "set_para_space_before": "문단 위 간격 설정",
     "set_para_hanging_indent": "내어쓰기 설정", "set_para_align": "정렬 변경", "set_page_size": "용지 크기 변경",
+    "set_char_size": "글자 크기 변경", "set_page_margin": "쪽 여백 변경", "set_cell_border": "표 양단선 제거",
 }
 
 
@@ -188,9 +189,11 @@ def render_report(res):
         w("  [%s] %d건" % (title, len(acts)))
         for a in acts:
             ref = ("charPr %s" % a["char_pr_id"]) if "char_pr_id" in a else \
-                  ("paraPr %s" % a["para_pr_id"]) if "para_pr_id" in a else ("구역 %s" % a.get("section_index"))
-            w("   - %s | %s | %s → %s | 대상 문단 %d개%s" % (
-                OP_LABEL.get(a["op"], a["op"]), ref, _short(a.get("from")), _short(a.get("to")), len(a["paragraphs"]),
+                  ("paraPr %s" % a["para_pr_id"]) if "para_pr_id" in a else \
+                  ("borderFill %s" % a["border_fill_id"]) if "border_fill_id" in a else ("구역 %s" % a.get("section_index"))
+            w("   - %s | %s | %s → %s | %s%s" % (
+                OP_LABEL.get(a["op"], a["op"]), ref, _short(a.get("from", a.get("from_mm"))), _short(a.get("to", a.get("to_mm"))),
+                "대상 셀 %d개" % len(a["cells"]) if a.get("cells") else "대상 문단 %d개" % len(a["paragraphs"]),
                 " | 다른 문단 %d개와 공유 → 정의 복제 필요" % len(a["shared_by_other_paragraphs"])
                 if a.get("clone_required") else ""))
             w("     XML: %s" % a.get("xml"))

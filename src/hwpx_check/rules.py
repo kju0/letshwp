@@ -15,9 +15,10 @@
 
 import copy
 import re
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 
-from hwpx_analysis.hierarchy import annotate_hierarchy, level_spacing, detect_bullet, LEVEL_EXAMPLE
+from hwpx_analysis.hierarchy import (annotate_hierarchy, item_above_spacing, bullet_above_spacing, detect_bullet,
+                                     note_marker_of, LEVEL_EXAMPLE)
 
 PASS, FAIL, UNKNOWN, SKIP = "PASS", "FAIL", "UNKNOWN", "SKIP"
 
@@ -26,6 +27,7 @@ FIX_MODE_BY_SPEC = {
     "분석 후 수정": "auto_if_role_confirmed",
     "검사만": "manual_review",
     "분석만": "none",
+    "수정 안 함": "none",
 }
 
 ROLE_SOURCE = "inspector 추정(규칙 기반 역할 분류)"
@@ -50,10 +52,10 @@ class Doc:
     def __init__(self, inspection, config, doc_type=None):
         self.r = inspection
         self.cfg = config
-        # 계층 정보를 설정(bullet_levels)에 맞춰 다시 계산하므로 입력을 변경하지 않도록 복사해서 쓴다
+        # 계층 정보를 설정(기호 층위·주석 기호)에 맞춰 다시 계산하므로 입력을 변경하지 않도록 복사해서 쓴다
         self.paragraphs = copy.deepcopy(inspection.get("paragraphs") or [])
-        bullet_levels = (config["rules"].get("PARA_SPACING") or {}).get("bullet_levels") or {}
-        self.hierarchy_summary = annotate_hierarchy(self.paragraphs, bullet_levels)
+        sp = config["rules"].get("PARA_SPACING") or {}
+        self.hierarchy_summary = annotate_hierarchy(self.paragraphs, sp.get("bullet_order"), sp.get("note_markers"))
         self.doc_type = doc_type if doc_type is not None else config.get("document_type")
         self.doc_type_source = ("CLI 지정" if doc_type is not None else
                                 "설정 파일" if config.get("document_type") else "미지정")
@@ -64,6 +66,9 @@ class Doc:
         self.fonts = fd.get("fonts") or {}
         self.sections = (inspection.get("document") or {}).get("sections") or []
         self.role_min = config.get("role_confidence_min", 0.6)
+        # FONT_SIZE 규칙이 채우는 '수정 후 글자 크기' (문단 index -> {charPr id: pt}).
+        # 내어쓰기 폭 추정은 글자 크기가 바뀔 문단에서 수정 후 크기로 계산해야 하므로 RULES 순서상 FONT_SIZE 가 먼저 돈다.
+        self.font_size_targets = {}
 
     def rule_cfg(self, rule_id):
         return self.cfg["rules"][rule_id]
@@ -265,17 +270,14 @@ def rule_paper_size(doc):
                    "source": VALUE_SOURCE, "refs": {"width_hwpunit": pg.get("width_hwpunit"),
                                                     "height_hwpunit": pg.get("height_hwpunit")}}
         tol = rc.get("tolerance_mm", 1.0)
-        # 방향은 별도 규칙에서 보므로 짧은 변/긴 변 기준으로 크기만 비교
-        ok = abs(min(w, h) - rc["width_mm"]) <= tol and abs(max(w, h) - rc["height_mm"]) <= tol
-        reason = "용지 짧은 변/긴 변이 %g×%gmm 와 허용오차 ±%gmm 이내로 %s" % (
-            rc["width_mm"], rc["height_mm"], tol, "일치" if ok else "불일치")
-        actions = None if ok else [{
-            "op": "set_page_size", "section_index": sec["index"],
-            "xml": "Contents/section%d.xml hp:secPr/hp:pagePr@width,@height" % sec["index"],
-            "from_mm": {"width": w, "height": h}, "to_mm": {"width": rc["width_mm"], "height": rc["height_mm"]},
-            "note": "HWPUNIT 환산값(1mm=7200/25.4)으로 기록. 본문 영역이 바뀌어 줄·쪽 나눔이 달라질 수 있음"}]
-        out.append(make_result(doc, "PAPER_SIZE", PASS if ok else FAIL, reason, target, current=current,
-                               expected=expected, fix_actions=actions))
+        # 방향은 별도 규칙에서 보므로 짧은 변/긴 변 기준으로 크기만 비교. pass/fail 판정 대상이 아니라 관찰만 보고한다
+        same = abs(min(w, h) - rc["width_mm"]) <= tol and abs(max(w, h) - rc["height_mm"]) <= tol
+        out.append(make_result(doc, "PAPER_SIZE", UNKNOWN,
+                               "용지 크기는 pass/fail 판정 대상이 아니며 강제 수정하지 않음('분석만')",
+                               target, current=current, expected=expected,
+                               observation="A4(%g×%gmm)와 %s" % (rc["width_mm"], rc["height_mm"], "일치" if same else "다름"),
+                               unknown_reason="요구사항 8: 용지 크기는 판정·수정 대상 아님",
+                               needed_info=None))
     return out
 
 
@@ -307,40 +309,52 @@ def rule_paper_orientation(doc):
     return out
 
 
+def _margin_actions(sec, bad, std, xml_sides):
+    return [{"op": "set_page_margin", "section_index": sec["index"],
+             "xml": "Contents/section%d.xml hp:secPr/hp:pagePr/hp:margin@%s" % (sec["index"], ",".join(xml_sides)),
+             "from_mm": bad, "to_mm": {k: std[k] for k in bad},
+             "note": "mm → HWPUNIT(1mm = 7200/25.4, 소수점 이하 버림: 한글 저장값과 일치). 본문 영역이 바뀌어 줄·쪽 나눔이 달라질 수 있음"}]
+
+
 def rule_page_margin(doc):
     rc = doc.rule_cfg("PAGE_MARGIN")
+    std = rc["values_mm"]
+    sides = ("top", "bottom", "left", "right")
     out = []
-    std = sorted(rc["values_mm_unordered"])
     for sec in doc.sections:
         pg = _page(doc, sec) or {}
         m = pg.get("margin_mm")
         target = {"type": "section", "section_index": sec["index"], "path": "sec%d/secPr/pagePr/margin" % sec["index"]}
-        expected = {"value": rc["values_mm_unordered"], "display": "20 / 20 / 20 / 10mm (방향 미확정)", "basis": rc["spec_text"]}
-        if not m:
+        expected = {"value": std, "display": "위 %g / 아래 %g / 왼쪽 %g / 오른쪽 %gmm" % tuple(std[k] for k in sides),
+                    "basis": rc["spec_text"]}
+        if not m or any(m.get(k) is None for k in sides):
             out.append(make_result(doc, "PAGE_MARGIN", UNKNOWN, "여백 정보 없음", target, expected=expected,
                                    unknown_reason="hp:pagePr/hp:margin 미발견", needed_info="구역 설정"))
             continue
-        cur = [m.get(k) for k in ("top", "bottom", "left", "right")]
-        current = {"value": {k: m.get(k) for k in ("top", "bottom", "left", "right")},
-                   "display": "위 %g / 아래 %g / 왼쪽 %g / 오른쪽 %gmm" % tuple(cur), "source": VALUE_SOURCE}
+        current = {"value": {k: m[k] for k in sides},
+                   "display": "위 %g / 아래 %g / 왼쪽 %g / 오른쪽 %gmm" % tuple(m[k] for k in sides), "source": VALUE_SOURCE}
         tol = doc.cfg.get("tolerance_mm", 0.5)
-        same_set = all(abs(a - b) <= tol for a, b in zip(sorted(cur), std))
-        obs = "값 집합이 표준과 %s" % ("일치(방향 대응은 미확정)" if same_set else "다름")
-        out.append(make_result(doc, "PAGE_MARGIN", UNKNOWN, "'분석만' 항목이며 방향별 대응이 미확정이라 판정하지 않음",
-                               target, current=current, expected=expected, observation=obs,
-                               unknown_reason="FORMAT_SPEC: 20/20/20/10mm 의 방향별 순서 미확정",
-                               needed_info="여백 값의 위/아래/왼쪽/오른쪽 대응 확정"))
+        bad = {k: m[k] for k in sides if abs(m[k] - std[k]) > tol}
+        if not bad:
+            out.append(make_result(doc, "PAGE_MARGIN", PASS, "쪽 여백이 표준값과 일치(허용 오차 ±%gmm)" % tol,
+                                   target, current=current, expected=expected))
+        else:
+            label = {"top": "위", "bottom": "아래", "left": "왼쪽", "right": "오른쪽"}
+            out.append(make_result(doc, "PAGE_MARGIN", FAIL,
+                                   "쪽 여백 %s ≠ 표준" % ", ".join("%s %gmm(표준 %gmm)" % (label[k], v, std[k]) for k, v in bad.items()),
+                                   target, current=current, expected=expected,
+                                   fix_actions=_margin_actions(sec, bad, std, list(bad))))
     return out
 
 
 def rule_header_footer_margin(doc):
     rc = doc.rule_cfg("HEADER_FOOTER_MARGIN")
+    std = {"header": rc["header_mm"], "footer": rc["footer_mm"]}
     out = []
     for sec in doc.sections:
         m = (_page(doc, sec) or {}).get("margin_mm")
         target = {"type": "section", "section_index": sec["index"], "path": "sec%d/secPr/pagePr/margin" % sec["index"]}
-        expected = {"value": {"header": rc["header_mm"], "footer": rc["footer_mm"]},
-                    "display": "머리말 %g / 꼬리말 %gmm" % (rc["header_mm"], rc["footer_mm"]), "basis": rc["spec_text"]}
+        expected = {"value": std, "display": "머리말 %g / 꼬리말 %gmm" % (std["header"], std["footer"]), "basis": rc["spec_text"]}
         if not m or m.get("header") is None or m.get("footer") is None:
             out.append(make_result(doc, "HEADER_FOOTER_MARGIN", UNKNOWN, "머리말·꼬리말 여백 정보 없음", target,
                                    expected=expected, unknown_reason="hp:margin@header/@footer 미발견",
@@ -349,16 +363,16 @@ def rule_header_footer_margin(doc):
         current = {"value": {"header": m["header"], "footer": m["footer"]},
                    "display": "머리말 %g / 꼬리말 %gmm" % (m["header"], m["footer"]), "source": VALUE_SOURCE}
         tol = doc.cfg.get("tolerance_mm", 0.5)
-        ok = abs(m["header"] - rc["header_mm"]) <= tol and abs(m["footer"] - rc["footer_mm"]) <= tol
-        if ok:
+        bad = {k: m[k] for k in ("header", "footer") if abs(m[k] - std[k]) > tol}
+        if not bad:
             out.append(make_result(doc, "HEADER_FOOTER_MARGIN", PASS, "머리말·꼬리말 여백이 표준값과 일치",
                                    target, current=current, expected=expected))
         else:
-            out.append(make_result(doc, "HEADER_FOOTER_MARGIN", UNKNOWN,
-                                   "'분석만' 항목이므로 불일치를 표준 위반으로 확정하지 않음",
-                                   target, current=current, expected=expected, observation="표준값과 다름",
-                                   unknown_reason="FORMAT_SPEC 처리 방식이 '분석만'",
-                                   needed_info="처리 방식이 '자동 수정' 등으로 확정되면 판정 가능"))
+            label = {"header": "머리말", "footer": "꼬리말"}
+            out.append(make_result(doc, "HEADER_FOOTER_MARGIN", FAIL,
+                                   "%s ≠ 표준" % ", ".join("%s %gmm(표준 %gmm)" % (label[k], v, std[k]) for k, v in bad.items()),
+                                   target, current=current, expected=expected,
+                                   fix_actions=_margin_actions(sec, bad, std, list(bad))))
     return out
 
 
@@ -417,22 +431,114 @@ def _mm(width_str):
 
 
 def rule_word_break(doc):
-    return [make_result(doc, "WORD_BREAK", SKIP, "어절 단위 자동 자간 조정은 현재 검사 범위 밖",
-                        unknown_reason="실제 줄바꿈 위치는 렌더링 결과이며 HWPX 의 linesegarray 는 레이아웃 캐시라 신뢰하지 않음. 조정 방식도 미확정",
-                        needed_info="렌더링 엔진 또는 한글 자동화로 줄바꿈 위치 확인, 조정 방식 확정")]
+    return [make_result(doc, "WORD_BREAK", SKIP, "어절 단위 줄바꿈용 자간 조정은 미구현(검사 범위 밖)",
+                        unknown_reason="어절이 어디서 잘리는지는 렌더링 결과이며, 내어쓰기 보정 후의 줄바꿈 위치를 계산할 렌더링 엔진이 없음(HWPX 의 linesegarray 는 수정 전 레이아웃 캐시)",
+                        needed_info="렌더링 엔진 또는 한글 자동화로 줄바꿈 위치 확인")]
+
+
+TOC_HEADING_TEXT = re.compile(r"^\s*(목\s*차|차\s*례|contents|table of contents)\s*$", re.I)
+
+
+def _sizes_of(doc, p):
+    """문단의 보이는 run 별 글자 크기(pt): {charPr id: size}"""
+    out = {}
+    for cid in doc.visible_char_pr_ids(p):
+        cp = doc.char_pr(cid)
+        if cp and cp.get("size_pt") is not None:
+            out[cid] = cp["size_pt"]
+    return out
 
 
 def rule_font_size(doc):
-    st = (doc.r.get("statistics") or {}).get("by_role") or {}
-    obs = {}
-    for role, info in st.items():
-        sizes = (info.get("fields") or {}).get("size_pt") or []
+    """역할별 글자 크기(요구사항 3·4·5). 주석은 바로 위(주석 아닌) 문단보다 2pt 작게, □ 항목 14pt(대제목 바로 다음은 15pt 허용)."""
+    rc = doc.rule_cfg("FONT_SIZE")
+    tol = rc.get("tolerance_pt", 0.05)
+    by_role = rc.get("by_role") or {}
+    undecided = rc.get("undecided_roles") or {}
+    note_markers = tuple(doc.rule_cfg("PARA_SPACING").get("note_markers") or ("*", "※"))
+    bullet_pt = rc.get("bullet_pt") or {}
+    bullet_after_h1 = rc.get("bullet_after_heading_1_allowed_pt") or {}
+    results, skipped = [], []
+    last_size = {}   # (영역, 표) -> 직전(주석 아닌) 문단의 대표 글자 크기
+    for p in doc.paragraphs:
+        if p.get("is_empty") or p["role"]["role"] in EXCLUDED_ROLES:
+            continue
+        role = p["role"]["role"]
+        ctx = p["context"]
+        key = (ctx.get("container"), ctx.get("table_id"), ctx.get("object_id"))
+        text = p.get("text") or ""
+        h = p.get("hierarchy") or {}
+        sizes = _sizes_of(doc, p)
+        dominant = (p.get("char_format") or {}).get("size_pt")
+        is_note = note_marker_of(text, note_markers) is not None
+        current = None
         if sizes:
-            obs[role] = {str(s["value"]): s["count"] for s in sizes[:5]}
-    return [make_result(doc, "FONT_SIZE", UNKNOWN, "글자 크기 표준값이 미확정",
-                        current={"value": obs, "display": "역할별 글자 크기 분포(문단 수)", "source": VALUE_SOURCE},
-                        unknown_reason="FORMAT_SPEC: 글자 크기 '미확정', 처리 방식 '분석만'",
-                        needed_info="역할별 글자 크기 표준값")]
+            distinct = sorted(set(sizes.values()))
+            current = {"value": distinct[0] if len(distinct) == 1 else distinct,
+                       "display": ", ".join("%gpt" % v for v in distinct) + (" (혼재)" if len(distinct) > 1 else ""),
+                       "source": VALUE_SOURCE + " - charPr@height", "refs": {"char_pr_sizes": sizes},
+                       "role_label": p["role"]["label"]}
+        expected_pt, basis, allowed, unknown = None, None, (), None
+        if role == "toc":
+            heading = bool(TOC_HEADING_TEXT.match(text))
+            expected_pt = rc["toc_heading_pt"] if heading else rc["toc_entry_pt"]
+            basis = "목차 %s" % ("제목" if heading else "항목(하위 제목·붙임·별첨)")
+        elif is_note or role == "note":
+            prev = last_size.get(key)
+            if not is_note:
+                unknown = ("'*'·'※' 로 시작하지 않는 참고·주석 문단의 글자 크기 기준은 요구사항에 없음", "주석 기호 없는 참고 문단의 기준")
+            elif prev is None:
+                unknown = ("바로 위 문장의 글자 크기를 알 수 없음(같은 영역의 앞 문단 없음)", "바로 위 문장의 글자 크기")
+            else:
+                expected_pt = prev + rc["note_relative_pt"]
+                basis = "바로 위 문장 %gpt %+dpt" % (prev, rc["note_relative_pt"])
+        elif h.get("kind") == "bullet" and h.get("marker") in bullet_pt:
+            expected_pt = bullet_pt[h["marker"]]
+            basis = "%s 항목" % h["marker"]
+            ps = h.get("previous_structural_paragraph")
+            prev_h = (doc.paragraphs[ps].get("hierarchy") or {}) if ps is not None else {}
+            if prev_h.get("kind") == "item" and prev_h.get("level") == 1 and h["marker"] in bullet_after_h1:
+                allowed = (bullet_after_h1[h["marker"]],)
+                basis += " (대제목 #%d 바로 다음이라 %gpt 허용)" % (ps, allowed[0])
+        elif role == "unclassified":
+            unknown = ("역할 미분류: %s" % (p["role"].get("unclassified_reason") or "근거 부족"), "문단 역할 확정")
+        elif role in by_role:
+            if p["role"]["confidence"] < doc.role_min:
+                unknown = ("역할 신뢰도 %.2f < 기준 %.2f" % (p["role"]["confidence"], doc.role_min), "문단 역할 확정")
+            else:
+                expected_pt, basis = by_role[role], p["role"]["label"]
+        elif role in undecided:
+            unknown = (undecided[role], "FORMAT_SPEC.md 에 해당 역할의 표준값 정의")
+        else:
+            skipped.append((p, "'%s' 역할의 글자 크기 표준은 요구사항에 없음(표준 미정)" % p["role"]["label"]))
+            if dominant:
+                last_size[key] = dominant
+            continue
+        if not (is_note or role == "note") and dominant:
+            last_size[key] = dominant
+        if unknown:
+            results.append(make_result(doc, "FONT_SIZE", UNKNOWN, "적용할 글자 크기 기준을 정할 수 없음", target_of(p), role_of(p),
+                                       current, unknown_reason=unknown[0], needed_info=unknown[1]))
+            continue
+        if current is None:
+            results.append(make_result(doc, "FONT_SIZE", UNKNOWN, "현재값을 추출하지 못함", target_of(p), role_of(p),
+                                       unknown_reason="charPr 정의 없음", needed_info="글자 모양 정의"))
+            continue
+        expected = {"value": expected_pt, "display": "%gpt" % expected_pt + (" (또는 %gpt)" % allowed[0] if allowed else ""),
+                    "basis": basis}
+        bad = {cid: v for cid, v in sizes.items()
+               if abs(v - expected_pt) > tol and not any(abs(v - a) <= tol for a in allowed)}
+        if bad:
+            doc.font_size_targets[p["index"]] = {cid: expected_pt for cid in bad}
+            actions = [{"op": "set_char_size", "char_pr_id": cid,
+                        "xml": "Contents/header.xml hh:charPr[@id=%d]@height" % cid, "from": v, "to": expected_pt}
+                       for cid, v in bad.items()]
+            results.append(make_result(doc, "FONT_SIZE", FAIL, "글자 크기 %s ≠ 기준 %s (%s)" % (current["display"], expected["display"], basis),
+                                       target_of(p), role_of(p), current, expected, fix_actions=actions))
+        else:
+            results.append(make_result(doc, "FONT_SIZE", PASS, "글자 크기가 기준(%s)과 일치 (%s)" % (expected["display"], basis),
+                                       target_of(p), role_of(p), current, expected))
+    return results + skip_group(doc, "FONT_SIZE", skipped)
 
 
 def _title_boxes(doc):
@@ -516,6 +622,8 @@ def _item_label(level, marker):
 
 
 def rule_para_spacing(doc):
+    """문단 위 간격(요구사항 7): 항목 번호는 자기 단계 기준(1. 20 / 가. 16 / 그 외 14),
+    항목 기호는 직전 항목과의 층위 관계(□ 사이 14, 한 층위 아래 6), 참고·주석 6, 일반 본문 6."""
     rc = doc.rule_cfg("PARA_SPACING")
     tol = rc.get("tolerance_pt", 0.05)
     special = _type_special(doc)
@@ -527,13 +635,13 @@ def rule_para_spacing(doc):
             continue
         if kind == "out_of_scope":
             if not p.get("is_empty") and p["role"]["role"] not in EXCLUDED_ROLES:
-                skipped.append((p, "본문 최상위 문단이 아님(표·머리말·각주·글상자 등) - 계층 간격 규칙 대상 아님"))
+                skipped.append((p, "본문 최상위 문단이 아님(표·머리말·각주·글상자 등) - 문단 간격 규칙 대상 아님"))
             continue
         if kind == "object":
-            skipped.append((p, "텍스트 없이 표·그림만 있는 문단 - 계층 간격 규칙 대상 아님"))
+            skipped.append((p, "텍스트 없이 표·그림만 있는 문단 - 문단 간격 규칙 대상 아님"))
             continue
         if kind == "other":
-            skipped.append((p, "번호 없는 %s 문단 - 계층 간격 규칙(항목/일반 본문)으로 간격을 정할 수 없음" % p["role"]["label"]))
+            skipped.append((p, "번호·기호·주석 기호 없는 %s 문단 - 문단 간격 규칙(항목/주석/일반 본문)으로 간격을 정할 수 없음" % p["role"]["label"]))
             continue
 
         pf = p.get("para_format") or {}
@@ -541,8 +649,8 @@ def rule_para_spacing(doc):
         current = None if cur_v is None else {
             "value": cur_v, "display": "문단 위 %gpt" % cur_v, "source": VALUE_SOURCE + " - paraPr/margin@prev",
             "refs": {"para_pr_id": pf.get("para_pr_id")}, "role_label": p["role"]["label"]}
-        hier = {k: h.get(k) for k in ("kind", "level", "marker", "compare_with", "owner_item",
-                                      "previous_paragraph", "blank_paragraphs_before")}
+        hier = {k: h.get(k) for k in ("kind", "level", "marker", "prev_marked", "owner_item",
+                                      "previous_paragraph", "previous_structural_paragraph", "blank_paragraphs_before")}
         observations = []
         if h.get("blank_paragraphs_before"):
             observations.append("앞에 빈 문단 %d개 - 시각적 중복 간격 가능(빈 문단은 삭제하지 않음)" % h["blank_paragraphs_before"])
@@ -550,9 +658,8 @@ def rule_para_spacing(doc):
         prev_after = ((prev or {}).get("para_format") or {}).get("space_after_pt")
         if prev_after:
             observations.append("직전 문단 #%d 의 문단 아래 간격 %gpt 가 별도로 있음" % (prev["index"], prev_after))
-        note = None
 
-        expected_pt, basis = None, None
+        expected_pt, basis, allowed = None, None, ()
         if special and special["paragraph"] == p["index"]:
             if special["status"] != "applied":
                 results.append(make_result(doc, "PARA_SPACING", UNKNOWN, "TYPE A/B 특례 대상 여부를 확정할 수 없음",
@@ -563,31 +670,34 @@ def rule_para_spacing(doc):
                 continue
             expected_pt, basis = special["expected"], special["reason"]
         elif kind == "unmapped_item":
-            results.append(make_result(doc, "PARA_SPACING", UNKNOWN, "항목의 계층(1~6단계)을 정할 수 없음",
+            results.append(make_result(doc, "PARA_SPACING", UNKNOWN, "항목의 번호·기호가 표준 체계에 없어 간격 기준을 정할 수 없음",
                                        target_of(p), role_of(p), current,
-                                       unknown_reason="번호·기호 '%s' 의 계층 대응이 명세 5.1 에 없음" % h.get("marker"),
-                                       needed_info="FORMAT_SPEC 5.1 계층 표기에 해당 번호·기호 추가(기호는 설정 bullet_levels)",
+                                       unknown_reason="번호·기호 '%s' 는 표준 번호(1. 가. 1) 가) ① ㉮)·기호(□ ㅇ - ․) 체계에 없음" % h.get("marker"),
+                                       needed_info="표준 번호·기호로 정리(항목 번호·항목 기호 규칙 참조) 또는 해당 표기의 간격 기준 추가",
                                        extra={"hierarchy": hier}))
             continue
         elif kind == "item":
-            cw = h.get("compare_with")
-            if not cw:
-                results.append(make_result(doc, "PARA_SPACING", UNKNOWN, "비교할 직전 유효 항목이 없음",
-                                           target_of(p), role_of(p), current,
-                                           unknown_reason=h.get("compare_unavailable_reason"),
-                                           needed_info="직전 문단의 계층·소속 확정", extra={"hierarchy": hier}))
+            expected_pt, why = item_above_spacing(h["level"], rc)
+            basis = "%s 항목 위 (%s)" % (_item_label(h["level"], h.get("marker")), why)
+        elif kind == "bullet":
+            ps = h.get("previous_structural_paragraph")
+            prev_h = (doc.paragraphs[ps].get("hierarchy") or {}) if ps is not None else {}
+            after_h1 = prev_h.get("kind") == "item" and prev_h.get("level") == 1
+            pt, allowed, why = bullet_above_spacing(h.get("prev_marked"), h["level"], rc, after_h1)
+            if pt is None:
+                if h.get("prev_marked") is None and h.get("prev_marked_unavailable_reason"):
+                    why = h["prev_marked_unavailable_reason"]
+                results.append(make_result(doc, "PARA_SPACING", UNKNOWN, "기호 항목 '%s' 위 간격의 기준이 없음" % h.get("marker"),
+                                           target_of(p), role_of(p), current, unknown_reason=why,
+                                           needed_info="요구사항 7(항목 기호 사이 간격)에 해당 이동의 간격 추가",
+                                           observation="; ".join(observations) or None, extra={"hierarchy": hier}))
                 continue
-            expected_pt, why = level_spacing(cw["level"], h["level"], rc)
-            prev_marker = (doc.paragraphs[cw["paragraph"]].get("hierarchy") or {}).get("marker")
-            via = " (직전 일반 본문의 소속 항목)" if h.get("previous_kind") == "body" else ""
-            basis = "%s #%d%s → %s: %s" % (_item_label(cw["level"], prev_marker), cw["paragraph"], via,
-                                          _item_label(h["level"], h.get("marker")), why)
-            if cw["level"] == 3 and h["level"] == 2:
-                note = ("FORMAT_SPEC 6 미확정 사항(하위 항목을 거쳐 상위 단계로 복귀할 때의 간격 해석)에 해당. "
-                        "명세 5.3·5.9 에 따라 14pt 를 적용했으며 규칙 확정 시 재검토 필요")
+            expected_pt, basis = pt, "기호 항목 '%s' 위: %s" % (h.get("marker"), why)
+        elif kind == "note":
+            expected_pt, basis = rc["note_above_pt"], "참고·주석('%s') 문장 위" % h.get("marker")
         elif kind == "body":
-            pk = h.get("previous_kind")
-            if pk not in ("item", "body"):
+            pk = h.get("previous_structural_kind")
+            if pk not in ("item", "bullet", "body"):
                 results.append(make_result(doc, "PARA_SPACING", UNKNOWN, "일반 본문의 직전 문단이 항목·본문이 아니어서 간격 기준이 모호",
                                            target_of(p), role_of(p), current,
                                            unknown_reason="직전 문단 종류: %s" % (pk or "없음(문서 첫 문단)"),
@@ -595,20 +705,22 @@ def rule_para_spacing(doc):
                 continue
             expected_pt = rc["body_pt"]
             owner = h.get("owner_item")
-            basis = "%s → 일반 본문%s" % ("항목" if pk == "item" else "일반 본문",
-                                         " (소속: %s #%d)" % (_item_label(owner["level"], (doc.paragraphs[owner["paragraph"]].get("hierarchy") or {}).get("marker")), owner["paragraph"]) if owner else " (소속 항목 없음)")
+            basis = "%s → 일반 본문%s" % (
+                "항목" if pk in ("item", "bullet") else "일반 본문",
+                " (소속: '%s' #%d)" % (owner.get("marker"), owner["paragraph"]) if owner else " (소속 항목 없음)")
 
-        expected = {"value": expected_pt, "display": "문단 위 %gpt" % expected_pt,
+        others = [a for a in allowed if abs(a - expected_pt) > tol]
+        expected = {"value": expected_pt, "display": "문단 위 %gpt" % expected_pt + (" (또는 %s)" % "·".join("%gpt" % a for a in others) if others else ""),
                     "basis": basis}
+        if others:
+            expected["allowed"] = list(allowed)
         extra = {"hierarchy": hier}
-        if note:
-            extra["interpretation_note"] = note
         if current is None:
             results.append(make_result(doc, "PARA_SPACING", UNKNOWN, "문단 위 간격 값을 추출하지 못함",
                                        target_of(p), role_of(p), None, expected,
                                        unknown_reason="paraPr margin@prev 없음", needed_info="문단 모양 정의", extra=extra))
             continue
-        ok = abs(cur_v - expected_pt) <= tol
+        ok = abs(cur_v - expected_pt) <= tol or any(abs(cur_v - a) <= tol for a in allowed)
         actions = None if ok else [{
             "op": "set_para_space_before", "para_pr_id": pf.get("para_pr_id"),
             "xml": "Contents/header.xml hh:paraPr[@id=%s]//hh:margin/hc:prev@value" % pf.get("para_pr_id"),
@@ -616,7 +728,7 @@ def rule_para_spacing(doc):
             "note": ("목표값으로 설정(기존값에 더하지 않음, 반복 적용해도 누적 없음). "
                      "hp:switch case(HwpUnitChar)에는 pt×100, default 에는 그 2배 값이 기록되는 구조(샘플 전수 관찰)")}]
         results.append(make_result(doc, "PARA_SPACING", PASS if ok else FAIL,
-                                   "문단 위 %gpt %s 기준 %gpt (%s)" % (cur_v, "=" if ok else "≠", expected_pt, basis),
+                                   "문단 위 %gpt %s 기준 %s (%s)" % (cur_v, "=" if ok else "≠", expected["display"][5:], basis),
                                    target_of(p), role_of(p), current, expected, fix_actions=actions,
                                    observation="; ".join(observations) or None, extra=extra))
     return results + skip_group(doc, "PARA_SPACING", skipped)
@@ -668,14 +780,16 @@ def _width_rule_text(rc):
 
 def estimate_prefix_width(doc, p, n):
     """문단 앞 n 글자(앞 공백 + 번호·기호 + 뒤 공백)의 폭(pt)을 글자 수로 근사한다.
-    각 글자는 자기 run 의 글자 모양(크기·장평·자간)을 쓴다. 자간·장평은 자동 수정 대상 글자 모양이면
-    수정 후 표준값으로 계산한다(Formatter 가 함께 바꾸므로). 반환: ((폭, 내역), None) 또는 (None, 사유)"""
+    각 글자는 자기 run 의 글자 모양(크기·장평·자간)을 쓴다. 장평은 자동 수정 대상 글자 모양이면 수정 후 표준값으로,
+    글자 크기는 FONT_SIZE 규칙이 바꿀 예정이면 그 목표값으로 계산한다(Formatter 가 함께 바꾸므로).
+    자간은 수정하지 않으므로 문서의 실제 값을 쓴다. 반환: ((폭, 내역), None) 또는 (None, 사유)"""
     rc = doc.rule_cfg("HANGING_INDENT")
     we = rc.get("width_estimate") or {}
     em = {"full": we.get("full_em", 1.0), "half": we.get("half_em", 0.5)}
     visible = set(doc.visible_char_pr_ids(p))
     std_ratio = doc.rule_cfg("CHAR_RATIO").get("value")
     std_spacing = doc.rule_cfg("CHAR_SPACING").get("value")
+    size_targets = doc.font_size_targets.get(p["index"]) or {}
     text = p.get("text") or ""
     owner = []
     for run in p.get("runs") or []:
@@ -692,6 +806,8 @@ def estimate_prefix_width(doc, p, n):
         if not cp:
             return None, "글자 모양 정의(charPr %s)가 없음" % owner[i]
         size = (cp.get("effective_size_pt") or {}).get(lang) or cp.get("size_pt")
+        if owner[i] in size_targets:
+            size = size_targets[owner[i]]   # 글자 크기 수정 후 기준
         if not size:
             return None, "글자 크기를 알 수 없음(charPr %s)" % owner[i]
         fixed = owner[i] in visible
@@ -705,6 +821,7 @@ def estimate_prefix_width(doc, p, n):
 
 def rule_hanging_indent(doc):
     rc = doc.rule_cfg("HANGING_INDENT")
+    note_markers = tuple(rc.get("note_markers") or ())
     trusted, app = _layout_trusted(doc)
     results, skipped = [], []
     for p in doc.text_paragraphs():
@@ -712,6 +829,8 @@ def rule_hanging_indent(doc):
         text = p.get("text") or ""
         m = p.get("list_marker")
         marker = m["marker"] if m else detect_bullet(p)
+        if not marker:
+            marker = note_marker_of(text, note_markers)   # '*', '※' 주석 기호도 내어쓰기 대상(요구사항 12)
         an = p.get("auto_numbering") or {}
         auto = not marker and an.get("type") in ("OUTLINE", "NUMBER", "BULLET")
         if not marker and not auto:
@@ -730,7 +849,7 @@ def rule_hanging_indent(doc):
                 ws = rest[: len(rest) - len(rest.lstrip(" \t　  "))]
                 desc = "없음" if not ws else " + ".join(WS_NAMES.get(c, "U+%04X" % ord(c)) for c in ws)
                 current = {"value": ws, "display": "'%s' 뒤 %s" % (marker, desc), "source": "문단 텍스트"}
-                expected = {"value": " ", "display": "번호·기호 뒤 공백 한 칸", "basis": rc["spec_text"]}
+                expected = {"value": " ", "display": "번호·기호·주석 기호 뒤 공백 한 칸", "basis": rc["spec_text"]}
                 obs = "번호·기호 앞에 공백 %d칸(공백으로 들여쓴 것으로 보임)" % leading if leading else None
                 ok = ws == " "
                 results.append(make_result(
@@ -826,7 +945,11 @@ def rule_font(doc):
 
 
 def _char_metric_rule(doc, rule_id, key):
-    std = doc.rule_cfg(rule_id)["value"]
+    rc = doc.rule_cfg(rule_id)
+    std = rc.get("value")
+    if std is None:
+        return [make_result(doc, rule_id, SKIP, "%s은(는) 수정하지 않는 항목" % rc["name"],
+                            unknown_reason=rc.get("spec_text") or "표준값 없음")]
 
     def current_fn(p):
         vals = {}
@@ -883,9 +1006,19 @@ def rule_line_spacing(doc):
         return {"value": {"type": t, "value": v}, "display": pf.get("line_spacing") or "%s %s" % (t, v),
                 "source": VALUE_SOURCE + " - paraPr/lineSpacing", "refs": {"para_pr_id": pf.get("para_pr_id")}}
 
+    rc = doc.rule_cfg("LINE_SPACING")
+    undecided_note = rc.get("note_after_object_undecided")
+
+    def after_object(p):
+        h = p.get("hierarchy") or {}
+        prev = h.get("previous_paragraph")
+        return prev is not None and (doc.paragraphs[prev].get("hierarchy") or {}).get("kind") == "object"
+
     def compare_fn(p, current, std):
         expected = {"value": {"type": "PERCENT", "value": std}, "display": "%d%%" % std,
-                    "basis": doc.rule_cfg("LINE_SPACING")["spec_text"]}
+                    "basis": rc["spec_text"]}
+        if undecided_note and p["role"]["role"] == "note" and after_object(p):
+            return UNKNOWN, "표/그림 바로 아래의 참고·주석", expected, undecided_note
         cv = current["value"]
         if cv["type"] != "PERCENT":
             return FAIL, "줄 간격 종류가 '%s'(%s)로 표준의 비율(%%) 방식과 다름" % (
@@ -925,8 +1058,13 @@ def rule_para_align(doc):
                 return UNKNOWN, "1×1 표 안의 문단", expected, \
                     "1×1 표는 글상자·박스 용도일 수 있어 '표 내부 항목'에 해당하는지 판단할 수 없음"
             text = (p.get("text") or "").strip()
-            if rc.get("numeric_cell_undecided") and any(ch.isdigit() for ch in text) and NUMERIC_CELL.match(text):
-                return UNKNOWN, "숫자 셀", expected, "숫자의 자리수 맞춤 방식이 미확정(FORMAT_SPEC 4)"
+            if any(ch.isdigit() for ch in text) and NUMERIC_CELL.match(text):
+                allowed = rc.get("numeric_cell_allowed") or []
+                exp = {"value": allowed, "display": "%s 허용" % "·".join(ALIGN_LABEL.get(a, a) for a in allowed),
+                       "basis": rc["spec_text"]}
+                if current["value"] in allowed:
+                    return PASS, "숫자 셀 정렬 %s 는 허용 범위(가운데·오른쪽)" % current["display"], exp, None
+                return FAIL, "숫자 셀 정렬 %s ≠ 허용 범위(가운데·오른쪽) → 가운데로 수정" % current["display"], expected, None
         if current["value"] != std:
             return FAIL, "정렬 %s ≠ 표준 %s" % (current["display"], expected["display"]), expected, None
         return PASS, "정렬이 표준(%s)과 일치" % expected["display"], expected, None
@@ -1116,6 +1254,78 @@ def rule_time_format(doc):
 
 
 # ----------------------------------------------------------------------------
+# 표 단위 규칙
+# ----------------------------------------------------------------------------
+def rule_table_side_border(doc):
+    """표 양단선(요구사항 10): 표의 양 끝 열에 있는 셀의 왼쪽/오른쪽 테두리선이 없어야 한다."""
+    rc = doc.rule_cfg("TABLE_SIDE_BORDER")
+    none_t = rc.get("none_type", "NONE")
+    boxes = {t["id"] for t, _ in _title_boxes(doc)}
+    results = []
+    for t in doc.r.get("tables") or []:
+        target = {"type": "table", "table_id": t["id"], "path": t.get("path"), "paragraph_index": t.get("anchor_paragraph")}
+        cols = t.get("cols") or 0
+        expected = {"value": none_t, "display": "왼쪽·오른쪽 끝 선 없음(NONE)", "basis": rc["spec_text"]}
+        if t["id"] in boxes:
+            results.append(make_result(doc, "TABLE_SIDE_BORDER", SKIP, "문서 제목 박스(양단선 1mm 규칙 대상)라 표 양단선 규칙에서 제외",
+                                       target, unknown_reason="문서 제목 박스는 '문서 제목 박스' 규칙(양단선 1mm)의 대상"))
+            continue
+        if not cols or not t.get("cells"):
+            results.append(make_result(doc, "TABLE_SIDE_BORDER", UNKNOWN, "표 열 수·셀 정보 없음", target, expected=expected,
+                                       unknown_reason="hp:tbl@colCnt 또는 hp:tc 미발견", needed_info="표 구조"))
+            continue
+        if t.get("rows") == 1 and cols == 1:
+            results.append(make_result(doc, "TABLE_SIDE_BORDER", UNKNOWN, "1×1 표", target, expected=expected,
+                                       unknown_reason="1×1 표는 글상자·박스 용도일 수 있어 일반 표의 양단선 규칙 대상인지 판단할 수 없음",
+                                       needed_info="1×1 표의 용도 확인"))
+            continue
+        edge_cells, bad, missing = [], [], []
+        for c in t["cells"]:
+            sides = []
+            if c.get("col") == 0:
+                sides.append("left")
+            if c.get("col") is not None and c["col"] + (c.get("col_span") or 1) == cols:
+                sides.append("right")
+            if not sides:
+                continue
+            edge_cells.append(c)
+            borders = c.get("borders")
+            if not borders:
+                missing.append(c)
+                continue
+            wrong = {s: (borders.get(s) or {}).get("type") for s in sides if (borders.get(s) or {}).get("type") != none_t}
+            if wrong:
+                bad.append((c, wrong))
+        if missing:
+            results.append(make_result(doc, "TABLE_SIDE_BORDER", UNKNOWN, "일부 셀의 테두리 정의(borderFill)를 찾지 못함", target,
+                                       expected=expected, unknown_reason="셀 %s 의 borderFillIDRef 정의 없음"
+                                       % ", ".join("%d행 %d열" % ((c.get("row") or 0) + 1, (c.get("col") or 0) + 1) for c in missing[:5]),
+                                       needed_info="header.xml 의 hh:borderFill 정의"))
+            continue
+        current = {"value": [{"row": c["row"], "col": c["col"], "sides": wrong} for c, wrong in bad],
+                   "display": "양 끝 열 셀 %d개 중 %d개에 끝 선 있음" % (len(edge_cells), len(bad)) if bad else "양 끝 열 셀 %d개 모두 끝 선 없음" % len(edge_cells),
+                   "source": VALUE_SOURCE + " - hp:tc@borderFillIDRef → hh:borderFill/leftBorder·rightBorder@type"}
+        if not bad:
+            results.append(make_result(doc, "TABLE_SIDE_BORDER", PASS, "표 양단선 없음", target, current=current, expected=expected))
+            continue
+        groups = OrderedDict()
+        for c, wrong in bad:
+            g = groups.setdefault((c.get("border_fill_id"), tuple(sorted(wrong))), {"from": {}, "cells": []})
+            g["from"].update(wrong)
+            g["cells"].append({"table_id": t["id"], "row": c["row"], "col": c["col"]})
+        actions = [{"op": "set_cell_border", "border_fill_id": bf, "sides": list(sides), "to": none_t, "from": g["from"],
+                    "cells": g["cells"],
+                    "xml": "Contents/header.xml hh:borderFill[@id=%s]/hh:%s@type" % (bf, "|".join("%sBorder" % s for s in sides)),
+                    "note": "셀이 쓰는 borderFill 을 복제해 해당 셀만 새 정의를 참조하게 함(다른 셀·표의 테두리는 그대로)"}
+                   for (bf, sides), g in groups.items()]
+        results.append(make_result(doc, "TABLE_SIDE_BORDER", FAIL,
+                                   "표 양 끝 열 셀 %d개에 왼쪽/오른쪽 테두리선이 있음(표준: 없음)" % len(bad),
+                                   target, current=current, expected=expected, fix_actions=actions,
+                                   observation="표 자체의 borderFill(hp:tbl@borderFillIDRef)은 셀 선 표시에 쓰이지 않는 것으로 보아 바꾸지 않음"))
+    return results
+
+
+# ----------------------------------------------------------------------------
 # 레지스트리: (규칙 ID, 함수). 순서가 보고서 순서가 된다.
 # ----------------------------------------------------------------------------
 RULES = [
@@ -1135,6 +1345,7 @@ RULES = [
     ("ITEM_NUMBER", rule_item_number),
     ("ITEM_BULLET", rule_item_bullet),
     ("HANGING_INDENT", rule_hanging_indent),
+    ("TABLE_SIDE_BORDER", rule_table_side_border),
     ("DATE_FORMAT", rule_date_format),
     ("TIME_FORMAT", rule_time_format),
 ]

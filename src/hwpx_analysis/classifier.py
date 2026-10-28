@@ -118,7 +118,7 @@ NUM_PATTERNS = [
     ("circled_digit", re.compile(r"^[①-⑳]"), 7),
     ("circled_hangul", re.compile(r"^[㉮-㉻]"), 8),
 ]
-BULLET_PATTERN = re.compile(r"^([□■◆◇○●◎◦•∙·‧ㆍ▶▷►▪▫☐❍]|ㅇ\s|[-–—]\s)")
+BULLET_PATTERN = re.compile(r"^([□■◆◇○●◎◦•∙·‧ㆍ▶▷►▪▫☐❍․]|ㅇ\s|[-–—]\s)")   # ․ = U+2024 표준 4층위 기호
 NOTE_STRONG = re.compile(r"^※")
 NOTE_MARKER = re.compile(r"^(\*|＊|주\s*[)）:：]|주\s*\d+\s*[)）]|참고\s*[:：)]|출처\s*[:：]|자료\s*[:：]|비고\s*[:：]|"
                          r"note\s*[:：]|source\s*[:：]|☞)", re.I)
