@@ -89,6 +89,7 @@ class RemoteScriptTest(unittest.TestCase):
         s = deploy.activate_script(cfg(), "R1")
         self.assertIn("-m unittest discover -s tests", s)
         self.assertIn('rm -rf "$REL"; exit 3', s)
+        self.assertIn("grep -E '^(Ran|OK|FAILED)' \"$REL/server_tests.log\"", s)
         self.assertIn('mv -Tf "$BASE/current.new" "$BASE/current"', s)
         self.assertIn("sudo -n systemctl restart letshwp-bot", s)
         self.assertIn('"connected": true', s)

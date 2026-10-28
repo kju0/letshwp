@@ -157,7 +157,7 @@ cd "$REL" || exit 10
 if ! "$PY" -m unittest discover -s tests > "$REL/server_tests.log" 2>&1; then
   echo SERVER_TESTS_FAILED; tail -n 40 "$REL/server_tests.log"; rm -rf "$REL"; exit 3
 fi
-echo "서버 테스트: $(tail -n 3 "$REL/server_tests.log" | tr '\\n' ' ')"
+echo "서버 테스트: $(grep -E '^(Ran|OK|FAILED)' "$REL/server_tests.log" | tr '\\n' ' ')"
 PREV=$(readlink -f "$BASE/current" 2>/dev/null || true)
 ln -sfn "$REL" "$BASE/current.new" && mv -Tf "$BASE/current.new" "$BASE/current"
 HEALTH=$( {health} )
