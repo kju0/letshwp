@@ -91,14 +91,39 @@ def op_set_para_hanging_indent(data, root, a):
     return edits
 
 
+def op_set_char_size(data, root, a):
+    # 글자 크기 = hh:charPr@height (HWPUNIT, 1pt = 100). 언어별 상대 크기(relSz)는 바꾸지 않는다
+    if root.local != "charPr" or "height" not in root.attrs:
+        raise OpNotApplicable("hh:charPr 의 height 속성이 없음")
+    return [set_attr_edit(data, root, "height", int(round(float(a["to"]) * HWPUNIT_PER_PT)))]
+
+
+# --- 테두리/배경(borderFill) ---------------------------------------------------
+BORDER_SIDE_ELEM = {"left": "leftBorder", "right": "rightBorder", "top": "topBorder", "bottom": "bottomBorder"}
+
+
+def op_set_cell_border(data, root, a):
+    # 셀이 쓰는 hh:borderFill 의 지정한 쪽 선 종류(type)를 바꾼다(기본: NONE = 선 없음)
+    edits = []
+    for side in a["sides"]:
+        name = BORDER_SIDE_ELEM.get(side)
+        if not name:
+            raise OpNotApplicable("알 수 없는 테두리 쪽: %s" % side)
+        for el in _only(root.kids(name), "hh:" + name):
+            edits.append(set_attr_edit(data, el, "type", a.get("to", "NONE")))
+    return edits
+
+
 DEF_OPS = {
     "set_char_spacing": ("charPr", op_set_char_spacing),
     "set_char_ratio": ("charPr", op_set_char_ratio),
     "set_char_font": ("charPr", op_set_char_font),
+    "set_char_size": ("charPr", op_set_char_size),
     "set_para_align": ("paraPr", op_set_para_align),
     "set_para_line_spacing": ("paraPr", op_set_para_line_spacing),
     "set_para_space_before": ("paraPr", op_set_para_space_before),
     "set_para_hanging_indent": ("paraPr", op_set_para_hanging_indent),
+    "set_cell_border": ("borderFill", op_set_cell_border),
 }
 
 
@@ -121,8 +146,27 @@ def op_set_page_size(data, page_pr, a):
     return [set_attr_edit(data, page_pr, "width", w), set_attr_edit(data, page_pr, "height", h)]
 
 
+def mm_to_hwpunit(mm):
+    # 한글 저장값 관측: 20mm → 5669, 10mm → 2834, 15mm → 4251 (소수점 이하 버림과 일치)
+    return int(float(mm) * HWPUNIT_PER_MM)
+
+
+def op_set_page_margin(data, page_pr, a):
+    # hp:pagePr/hp:margin 의 쪽(top/bottom/left/right/header/footer) 값을 mm → HWPUNIT 으로 바꿔 설정
+    margins = page_pr.kids("margin")
+    if not margins:
+        raise OpNotApplicable("hp:pagePr 에 hp:margin 이 없음")
+    edits = []
+    for side, mm in a["to_mm"].items():
+        if side not in ("top", "bottom", "left", "right", "header", "footer"):
+            raise OpNotApplicable("알 수 없는 여백 항목: %s" % side)
+        edits.append(set_attr_edit(data, margins[0], side, mm_to_hwpunit(mm)))
+    return edits
+
+
 SECTION_OPS = {
     "set_page_size": op_set_page_size,
+    "set_page_margin": op_set_page_margin,
 }
 
 

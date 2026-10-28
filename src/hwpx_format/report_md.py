@@ -51,9 +51,11 @@ def render_markdown(meta, before, after, fix, verification):
     L += ["", "## 1. 한눈에 보기", ""]
     L += _table(["구분", "수정 전", "수정 후"],
                 [[label, sb[k], sa[k] if sa else "-"] for k, label in STATUSES] + [["합계", sb["total"], sa["total"] if sa else "-"]])
-    para_count = len({pi for c in fix["clones"] for pi in c["paragraphs"]})
+    para_count = len({pi for c in fix["clones"] for pi in c.get("paragraphs") or []})
+    cell_count = len({(x["table_id"], x["row"], x["col"]) for c in fix["clones"] for x in c.get("cells") or []})
     L += ["",
-          "- 수정한 항목: **%d건** (문단 %d개, 서식 정의 %d개 추가)" % (len(applied_ids), para_count, len(fix["clones"])),
+          "- 수정한 항목: **%d건** (문단 %d개%s, 서식 정의 %d개 추가)" % (
+              len(applied_ids), para_count, ", 표 셀 %d개" % cell_count if cell_count else "", len(fix["clones"])),
           "- 수정하지 않은 항목: **%d건** (아래 4절)" % (len(before["fix_plan"]["manual_review"]) + len(fix["not_applied"]))]
 
     # 2. 수정 내역
@@ -87,7 +89,9 @@ def render_markdown(meta, before, after, fix, verification):
     if fix["not_applied"]:
         L += ["### 적용하지 못한 수정", ""]
         L += _table(["동작", "대상", "문단", "사유"],
-                    [[OP_LABEL.get(a["op"], a["op"]), _def_label(a), ", ".join("#%d" % p for p in a.get("paragraphs") or []), a["reason"]]
+                    [[OP_LABEL.get(a["op"], a["op"]), _def_label(a),
+                      ", ".join("#%d" % p for p in a.get("paragraphs") or []) or
+                      ", ".join("%s %d행%d열" % (c["table_id"], c["row"] + 1, c["col"] + 1) for c in a.get("cells") or []), a["reason"]]
                      for a in fix["not_applied"]])
         L.append("")
     if not manual and not fix["not_applied"]:
@@ -119,6 +123,8 @@ def _def_label(a):
         return "글자 모양 id %s" % a["char_pr_id"]
     if "para_pr_id" in a:
         return "문단 모양 id %s" % a["para_pr_id"]
+    if "border_fill_id" in a:
+        return "테두리 정의 id %s" % a["border_fill_id"]
     return "구역 %s" % a.get("section_index")
 
 

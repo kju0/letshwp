@@ -75,7 +75,7 @@ def verify(src_path, out_path, before_ins, after_ins, before_check, after_check,
                          "표 %d개, 그림 %d개 일치" % (len(t1), len(pics1)) if not t_diffs else "; ".join(t_diffs)))
 
     # 5) 대상이 아닌 문단의 서식은 그대로
-    targets = {pi for c in fix["clones"] for pi in c["paragraphs"]}
+    targets = {pi for c in fix["clones"] for pi in c.get("paragraphs") or []}
     f_diffs = []
     if len(p1) == len(p2):
         for a, b in zip(p1, p2):
@@ -86,6 +86,19 @@ def verify(src_path, out_path, before_ins, after_ins, before_check, after_check,
                 f_diffs.append("#%d" % a["index"])
     checks.append(_check("수정 대상이 아닌 문단의 서식 변화 없음", not f_diffs,
                          "대상 문단 %d개 외 변화 없음" % len(targets) if not f_diffs else "변화: %s" % ", ".join(f_diffs[:20])))
+
+    # 5-2) 대상이 아닌 표 셀의 테두리 정의는 그대로
+    cell_targets = {(x["table_id"], x["row"], x["col"]) for c in fix["clones"] for x in c.get("cells") or []}
+    c_diffs = []
+    if len(t1) == len(t2):
+        for a, b in zip(t1, t2):
+            for ca, cb in zip(a.get("cells") or [], b.get("cells") or []):
+                if (a.get("id"), ca.get("row"), ca.get("col")) in cell_targets:
+                    continue
+                if ca.get("border_fill_id") != cb.get("border_fill_id") or ca.get("borders") != cb.get("borders"):
+                    c_diffs.append("%s %s행 %s열" % (a.get("id"), (ca.get("row") or 0) + 1, (ca.get("col") or 0) + 1))
+    checks.append(_check("수정 대상이 아닌 표 셀의 테두리 변화 없음", not c_diffs,
+                         "대상 셀 %d개 외 변화 없음" % len(cell_targets) if not c_diffs else "변화: %s" % ", ".join(c_diffs[:20])))
 
     # 6) 재검사: 적용한 수정의 FAIL 이 PASS 로 바뀌었고, 원래 PASS 였던 항목이 FAIL 이 되지 않음
     def keyed(check):

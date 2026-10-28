@@ -4,7 +4,8 @@
 - 기존 charPr/paraPr 정의는 고치지 않는다. 수정 대상 문단이 쓰는 정의를 복제해 새 id 로 추가하고,
   대상 문단(또는 그 문단의 run)만 새 id 를 참조하게 바꾼다. 그래서 대상이 아닌 문단·스타일의 서식은 그대로다.
 - 같은 정의를 쓰는 대상 문단이라도 적용할 op 묶음이 다르면 묶음별로 따로 복제한다.
-- 구역 설정(용지 크기)은 해당 구역의 hp:pagePr 값을 직접 바꾼다.
+- 표 셀 테두리(borderFill)도 같은 방식으로 복제해 대상 셀(hp:tc)만 새 id 를 참조하게 한다.
+- 구역 설정(쪽 여백 등)은 해당 구역의 hp:pagePr 값을 직접 바꾼다.
 - XML 은 바이트 단위로 필요한 속성만 바꾼다(xmlpatch). 텍스트·문단·표·그림 요소는 건드리지 않는다.
 """
 
@@ -19,9 +20,11 @@ from hwpx_analysis.xmlutil import ln
 from .ops import DEF_OPS, SECTION_OPS, OpNotApplicable
 from .xmlpatch import scan, set_attr_edit, apply_edits, XmlPatchError
 
-REF_ATTR = {"charPr": "charPrIDRef", "paraPr": "paraPrIDRef"}
-CONTAINER = {"charPr": "charProperties", "paraPr": "paraProperties"}
-ID_KEY = {"charPr": "char_pr_id", "paraPr": "para_pr_id"}
+REF_ATTR = {"charPr": "charPrIDRef", "paraPr": "paraPrIDRef", "borderFill": "borderFillIDRef"}
+CONTAINER = {"charPr": "charProperties", "paraPr": "paraProperties", "borderFill": "borderFills"}
+ID_KEY = {"charPr": "char_pr_id", "paraPr": "para_pr_id", "borderFill": "border_fill_id"}
+# 복제 대상 정의의 적용 단위: charPr/paraPr 는 문단(run), borderFill 은 표 셀(hp:tc)
+TARGET_UNIT = {"charPr": "paragraph", "paraPr": "paragraph", "borderFill": "cell"}
 
 
 class ApplyError(RuntimeError):
@@ -81,7 +84,7 @@ def write_zip(out_path, infos, data):
 
 def _def_index(header_bytes):
     root, _ = scan(header_bytes)
-    defs = {"charPr": {}, "paraPr": {}}
+    defs = {k: {} for k in CONTAINER}
     containers = {}
     for kind, cont in CONTAINER.items():
         conts = list(root.iter(cont))
@@ -121,7 +124,9 @@ def apply_fix_plan(src_path, out_path, inspection, check):
                 did = a.get(ID_KEY[kind])
                 if did not in defs[kind]:
                     raise OpNotApplicable("header.xml 에 hh:%s id=%s 정의가 없음" % (kind, did))
-                if not a.get("paragraphs"):
+                if TARGET_UNIT[kind] == "cell" and not a.get("cells"):
+                    raise OpNotApplicable("대상 셀이 지정되지 않음")
+                if TARGET_UNIT[kind] == "paragraph" and not a.get("paragraphs"):
                     raise OpNotApplicable("대상 문단이 지정되지 않음")
                 _run_def_op(header_bytes, defs[kind][did], a)
                 def_actions.append((kind, did, a))
@@ -133,21 +138,26 @@ def apply_fix_plan(src_path, out_path, inspection, check):
             not_applied.append(dict(a, reason=str(e)))
 
     # 2) 정의별로 대상 문단을 '적용할 op 묶음' 이 같은 것끼리 나눈다
-    per_para = defaultdict(list)  # (kind, def_id, paragraph) -> [action]
+    # 대상 키: 문단은 index(int), 셀은 ("cell", 표 id, 행, 열)
+    per_target = defaultdict(list)  # (kind, def_id, target) -> [action]
     for kind, did, a in def_actions:
-        for pi in a["paragraphs"]:
-            per_para[(kind, did, pi)].append(a)
-    groups = OrderedDict()  # (kind, def_id, op 묶음) -> [paragraph]
-    for (kind, did, pi), acts in sorted(per_para.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2])):
+        if TARGET_UNIT[kind] == "cell":
+            for c in a["cells"]:
+                per_target[(kind, did, ("cell", c["table_id"], c["row"], c["col"]))].append(a)
+        else:
+            for pi in a["paragraphs"]:
+                per_target[(kind, did, pi)].append(a)
+    groups = OrderedDict()  # (kind, def_id, op 묶음) -> [target]
+    for (kind, did, tg), acts in sorted(per_target.items(), key=lambda kv: (kv[0][0], kv[0][1], str(kv[0][2]))):
         key = (kind, did, tuple(sorted(x["action_no"] for x in acts)))
-        groups.setdefault(key, []).append(pi)
+        groups.setdefault(key, []).append(tg)
 
     by_no = {a["action_no"]: a for _, _, a in def_actions}
     next_id = {k: (max(v) + 1 if v else 0) for k, v in defs.items()}
-    new_defs = {"charPr": [], "paraPr": []}
+    new_defs = {k: [] for k in CONTAINER}
     clones = []
-    retarget = defaultdict(list)  # paragraph -> [(kind, old, new)]
-    for (kind, did, nos), paras in groups.items():
+    retarget = defaultdict(list)  # target -> [(kind, old, new)]
+    for (kind, did, nos), targets in groups.items():
         frag_edits = []
         frag, froot, _ = _run_def_op(header_bytes, defs[kind][did], by_no[nos[0]])
         for no in nos:
@@ -157,10 +167,12 @@ def apply_fix_plan(src_path, out_path, inspection, check):
         next_id[kind] += 1
         frag_edits.append(set_attr_edit(frag, froot, "id", new_id))
         new_defs[kind].append(apply_edits(frag, _dedupe(frag_edits)))
-        clones.append({"kind": kind, "from_id": did, "new_id": new_id, "paragraphs": paras,
+        paras = [t for t in targets if not isinstance(t, tuple)]
+        cells = [{"table_id": t[1], "row": t[2], "col": t[3]} for t in targets if isinstance(t, tuple)]
+        clones.append({"kind": kind, "from_id": did, "new_id": new_id, "paragraphs": paras, "cells": cells,
                        "action_nos": list(nos), "ops": sorted({by_no[n]["op"] for n in nos})})
-        for pi in paras:
-            retarget[pi].append((kind, did, new_id))
+        for t in targets:
+            retarget[t].append((kind, did, new_id))
 
     # 3) header.xml: 복제 정의를 각 목록 끝에 추가하고 itemCnt 갱신
     h_edits = []
@@ -187,14 +199,48 @@ def apply_fix_plan(src_path, out_path, inspection, check):
             sec_scans[si] = (part, root, [e for e in order if e.local == "p"])
         return sec_scans[si]
 
-    for pi, items in sorted(retarget.items()):
+    def para_elem(pi):
         para = paragraphs[pi]
         si = para["section"]
         part, _, p_elems = sec_scan(si)
         ordinal = sections[si][1].get(para["path"])
         if ordinal is None or ordinal >= len(p_elems):
             raise ApplyError("문단 #%d(%s) 의 XML 위치를 찾지 못함" % (pi, para["path"]))
-        p_el = p_elems[ordinal]
+        return si, part, p_elems[ordinal]
+
+    tables_by_id = {t["id"]: t for t in inspection.get("tables") or []}
+
+    def cell_elem(table_id, row, col):
+        """표 셀(hp:tc) 요소: 표의 앵커 문단 → 그 문단의 n번째 hp:tbl → cellAddr 가 (row, col) 인 hp:tc."""
+        t = tables_by_id.get(table_id)
+        if not t:
+            raise ApplyError("표 %s 를 분석 결과에서 찾지 못함" % table_id)
+        si, part, p_el = para_elem(t["anchor_paragraph"])
+        try:
+            k = int(str(t["path"]).rsplit("/tbl", 1)[1])
+        except (IndexError, ValueError):
+            raise ApplyError("표 %s 의 경로(%s)에서 순번을 읽지 못함" % (table_id, t.get("path")))
+        tbls = [tb for run in p_el.kids("run") for tb in run.kids("tbl")]
+        if k >= len(tbls):
+            raise ApplyError("문단 #%d 에 hp:tbl %d번이 없음" % (t["anchor_paragraph"], k))
+        for tr in tbls[k].kids("tr"):
+            for tc in tr.kids("tc"):
+                addr = tc.kids("cellAddr")
+                if addr and addr[0].attrs.get("rowAddr") == str(row) and addr[0].attrs.get("colAddr") == str(col):
+                    return si, part, tc
+        raise ApplyError("표 %s 의 셀(%d행 %d열)을 XML 에서 찾지 못함" % (table_id, row + 1, col + 1))
+
+    for tg, items in sorted(retarget.items(), key=lambda kv: str(kv[0])):
+        if isinstance(tg, tuple):
+            si, part, tc_el = cell_elem(tg[1], tg[2], tg[3])
+            sec_bytes = data[part]
+            for kind, old, new in items:
+                if tc_el.attrs.get("borderFillIDRef") != str(old):
+                    raise ApplyError("표 %s 셀(%d행 %d열)의 borderFillIDRef 가 %s 가 아님" % (tg[1], tg[2] + 1, tg[3] + 1, old))
+                sec_edit_lists[si].append(set_attr_edit(sec_bytes, tc_el, "borderFillIDRef", new))
+            continue
+        pi = tg
+        si, part, p_el = para_elem(pi)
         sec_bytes = data[part]
         for kind, old, new in items:
             if kind == "paraPr":

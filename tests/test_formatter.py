@@ -102,6 +102,25 @@ class OpsTest(unittest.TestCase):
         landscape = _apply(ops.op_set_page_size, b'<hp:pagePr width="79200" height="61200"/>', a)
         self.assertEqual(landscape, b'<hp:pagePr width="84188" height="59528"/>')
 
+    def test_page_margin(self):
+        data = b'<hp:pagePr width="59528" height="84188"><hp:margin header="4000" footer="2834" left="5669" right="5669" top="4000" bottom="4251"/></hp:pagePr>'
+        out = _apply(ops.op_set_page_margin, data, {"to_mm": {"top": 20.0, "bottom": 10.0, "header": 10.0}})
+        self.assertEqual(out, b'<hp:pagePr width="59528" height="84188"><hp:margin header="2834" footer="2834" left="5669" right="5669" top="5669" bottom="2834"/></hp:pagePr>')
+        self.assertEqual((ops.mm_to_hwpunit(15), ops.mm_to_hwpunit(20)), (4251, 5669))   # 한글 저장값과 일치
+
+    def test_char_size(self):
+        data = b'<hh:charPr id="3" height="1200"><hh:fontRef hangul="0"/></hh:charPr>'
+        self.assertEqual(_apply(ops.op_set_char_size, data, {"to": 15}), b'<hh:charPr id="3" height="1500"><hh:fontRef hangul="0"/></hh:charPr>')
+
+    def test_cell_border_sides(self):
+        data = (b'<hh:borderFill id="2"><hh:leftBorder type="SOLID" width="0.12 mm"/><hh:rightBorder type="SOLID" width="0.12 mm"/>'
+                b'<hh:topBorder type="SOLID" width="0.12 mm"/></hh:borderFill>')
+        out = _apply(ops.op_set_cell_border, data, {"sides": ["left", "right"], "to": "NONE"})
+        self.assertEqual(out, b'<hh:borderFill id="2"><hh:leftBorder type="NONE" width="0.12 mm"/><hh:rightBorder type="NONE" width="0.12 mm"/>'
+                              b'<hh:topBorder type="SOLID" width="0.12 mm"/></hh:borderFill>')
+        with self.assertRaises(ops.OpNotApplicable):
+            _apply(ops.op_set_cell_border, data, {"sides": ["bottom"], "to": "NONE"})
+
 
 class FormatHwpxTest(unittest.TestCase):
     def setUp(self):
@@ -146,7 +165,7 @@ class FormatHwpxTest(unittest.TestCase):
             sec1, sec2 = z1.read("Contents/section0.xml"), z2.read("Contents/section0.xml")
         # 본문 XML 은 참조 id 속성만 바뀌고 길이 차이는 id 자릿수 차이뿐이어야 한다
         import re
-        norm = lambda s: re.sub(rb'(charPrIDRef|paraPrIDRef)="\d+"', b"\\1=\"\"", s)  # noqa: E731
+        norm = lambda s: re.sub(rb'(charPrIDRef|paraPrIDRef|borderFillIDRef)="\d+"', b"\\1=\"\"", s)  # noqa: E731
         self.assertEqual(norm(sec1), norm(sec2))
 
     def test_shared_definitions_are_cloned_not_modified(self):
@@ -154,7 +173,7 @@ class FormatHwpxTest(unittest.TestCase):
         a, b = inspect_hwpx(str(self.src)), inspect_hwpx(str(res["output"]))
         defs_a, defs_b = a["format_definitions"], b["format_definitions"]
         # 기존 정의는 그대로 남고 복제본만 추가된다
-        for key in ("char_properties", "para_properties"):
+        for key in ("char_properties", "para_properties", "border_fills"):
             old, new = defs_a[key], defs_b[key]  # id(문자열) -> 정의
             self.assertGreaterEqual(len(new), len(old))
             for i, d in old.items():
@@ -182,19 +201,51 @@ class FormatHwpxTest(unittest.TestCase):
         self.assertEqual(res2["fix"]["changed_parts"], [])
         self.assertEqual(res2["summary_before"], res2["summary_after"])
 
-    def test_page_size_fixed(self):
+    def test_page_margin_fixed_but_paper_size_not(self):
         bad = self.dir / "letter.hwpx"
         with zipfile.ZipFile(self.src) as z, zipfile.ZipFile(bad, "w") as o:
             for i in z.infolist():
                 data = z.read(i.filename)
                 if i.filename == "Contents/section0.xml":
-                    data = SECTION.replace('width="59528" height="84188"', 'width="61200" height="79200"').encode("utf-8")
+                    data = SECTION.replace('width="59528" height="84188"', 'width="61200" height="79200"').replace(
+                        'header="2835" footer="2835" gutter="0" left="5669" right="5669" top="5669" bottom="2835"',
+                        'header="4000" footer="2835" gutter="0" left="5669" right="4000" top="7000" bottom="2835"').encode("utf-8")
                 o.writestr(i, data)
         res = self._run(src=bad, name="letter_out")
         self.assertTrue(res["ok"], res["errors"])
-        self.assertIn("set_page_size", [a["op"] for a in res["fix"]["applied"]])
+        ops_applied = [a["op"] for a in res["fix"]["applied"]]
+        self.assertIn("set_page_margin", ops_applied)
+        self.assertNotIn("set_page_size", ops_applied)          # 용지 크기는 판정·수정 대상 아님
         after = json.loads((self.dir / "letter_out" / "check_after.json").read_text(encoding="utf-8"))
-        self.assertEqual([r["status"] for r in after["results"] if r["rule_id"] == "PAPER_SIZE"], ["PASS"])
+        st = {r["rule_id"]: r["status"] for r in after["results"] if r["rule_id"] in ("PAPER_SIZE", "PAGE_MARGIN", "HEADER_FOOTER_MARGIN")}
+        self.assertEqual(st, {"PAPER_SIZE": "UNKNOWN", "PAGE_MARGIN": "PASS", "HEADER_FOOTER_MARGIN": "PASS"})
+        pg = inspect_hwpx(str(res["output"]))["document"]["sections"][0]["properties"]["page"]
+        self.assertEqual((pg["paper"], pg["margin_mm"]["top"], pg["margin_mm"]["right"], pg["margin_mm"]["header"]),
+                         ("Letter", 20.0, 20.0, 10.0))
+
+    def test_table_side_border_removed_for_edge_cells_only(self):
+        res = self._run()
+        self.assertTrue(res["ok"], res["errors"])
+        self.assertIn("set_cell_border", [a["op"] for a in res["fix"]["applied"]])
+        after = json.loads((self.dir / "out" / "check_after.json").read_text(encoding="utf-8"))
+        self.assertEqual([r["status"] for r in after["results"] if r["rule_id"] == "TABLE_SIDE_BORDER"], ["PASS"])
+        cells = {(c["row"], c["col"]): c["borders"] for c in inspect_hwpx(str(res["output"]))["tables"][0]["cells"]}
+        self.assertEqual((cells[(0, 0)]["left"]["type"], cells[(0, 0)]["right"]["type"]), ("NONE", "NONE"))   # 2열 병합 셀
+        self.assertEqual((cells[(1, 0)]["left"]["type"], cells[(1, 0)]["right"]["type"]), ("NONE", "SOLID"))  # 왼쪽 끝 열
+        self.assertEqual((cells[(1, 1)]["left"]["type"], cells[(1, 1)]["right"]["type"]), ("SOLID", "NONE"))  # 오른쪽 끝 열
+        self.assertEqual(cells[(1, 0)]["top"]["type"], "SOLID")                                              # 위아래 선은 그대로
+        clones = [c for c in res["fix"]["clones"] if c["kind"] == "borderFill"]
+        self.assertEqual(sum(len(c["cells"]) for c in clones), 5)
+
+    def test_char_spacing_and_font_size_handling(self):
+        res = self._run()
+        self.assertNotIn("set_char_spacing", [a["op"] for a in res["fix"]["applied"]])   # 자간은 수정하지 않음
+        self.assertIn("set_char_size", [a["op"] for a in res["fix"]["applied"]])
+        b = inspect_hwpx(str(res["output"]))
+        title = next(p for p in b["paragraphs"] if p["text"].startswith("보고서 제목"))
+        self.assertEqual(title["char_format"]["spacing_hangul"], -2)                      # 원래 자간 유지
+        heading = next(p for p in b["paragraphs"] if p["text"].startswith("1. 현황"))
+        self.assertEqual((heading["char_format"]["size_pt"], heading["char_format"]["font_hangul"]), (15.0, "HY헤드라인M"))
 
     def test_verification_failure_discards_output(self):
         fail = {"all_ok": False, "checks": [{"name": "강제 실패", "status": "FAIL", "detail": "테스트"}]}
@@ -209,7 +260,7 @@ class FormatHwpxTest(unittest.TestCase):
     def test_markdown_report(self):
         self._run()
         md = (self.dir / "out" / "change_report.md").read_text(encoding="utf-8")
-        for s in ("# 서식 수정 보고서", "✅", "## 1. 한눈에 보기", "## 2. 수정한 내용", "### 자간",
+        for s in ("# 서식 수정 보고서", "✅", "## 1. 한눈에 보기", "## 2. 수정한 내용", "### 장평", "### 표 양단선",
                   "## 3. 검증 결과", "## 4. 수정하지 않은 항목", "| 위치 | 내용 | 변경 전 | 변경 후 |"):
             self.assertIn(s, md)
 
