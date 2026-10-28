@@ -9,6 +9,7 @@
     python3 scripts/deploy.py join-bot                    봇 계정을 팀·채널에 추가(계정은 시스템 콘솔에서 생성)
     python3 scripts/deploy.py set-token                   봇 토큰 교체: 숨김 입력(또는 표준 입력) → 서버에서 확인 후 저장·재시작
     python3 scripts/deploy.py set-env KEY=VALUE           서버 설정 파일 값 변경(토큰 제외)
+    python3 scripts/deploy.py upload-fonts <ttf...>       글꼴 파일을 서버 <base>/shared/fonts/ 에 올린다(저장소에 넣지 않음)
 
 배포 순서(하나라도 실패하면 중단, 서버 반영 후 실패하면 직전 버전으로 자동 복구)
     1. 로컬 검사: 커밋 안 된 변경이 없고, HEAD 가 origin/main 에 push 되어 있어야 한다
@@ -346,6 +347,26 @@ def cmd_join_bot(cfg):
         raise DeployError("봇 팀·채널 추가 실패", 4)
 
 
+def cmd_upload_fonts(cfg, files):
+    """글꼴 파일(.ttf/.ttc)을 서버 글꼴 폴더에 올린다. 봇은 LETSHWP_FONT_DIR 로 이 폴더를 읽는다."""
+    paths = [Path(f) for f in files]
+    bad = [str(p) for p in paths if not p.is_file() or p.suffix.lower() not in (".ttf", ".ttc", ".otf")]
+    if bad or not paths:
+        raise DeployError("글꼴 파일(.ttf/.ttc)이 아님: %s" % (", ".join(bad) or "(없음)"))
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as t:
+        for p in paths:
+            t.add(str(p), arcname=p.name)
+    fonts = cfg["base_dir"] + "/shared/fonts"
+    script = "mkdir -p {f} && tar -xf - -C {f} && {own} && ls -1 {f}".format(f=q(fonts), own=own(cfg))
+    rc, out = ssh(cfg, script, stdin=buf.getvalue())
+    print(out.strip())
+    if rc != 0:
+        raise DeployError("글꼴 업로드 실패", 4)
+    cmd_set_env(cfg, "LETSHWP_FONT_DIR", fonts)
+    print("글꼴 %d개 업로드 완료. 다음 배포(또는 재시작) 때부터 봇이 사용합니다." % len(paths))
+
+
 def cmd_status(cfg):
     b = q(cfg["base_dir"])
     script = """
@@ -386,8 +407,8 @@ def cmd_logs(cfg, n):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="letshwp 서버 배포")
     ap.add_argument("command", nargs="?", default="deploy",
-                    choices=["deploy", "setup", "join-bot", "status", "rollback", "logs", "set-token", "set-env"])
-    ap.add_argument("arg", nargs="?", help="set-env 의 KEY=VALUE")
+                    choices=["deploy", "setup", "join-bot", "status", "rollback", "logs", "set-token", "set-env", "upload-fonts"])
+    ap.add_argument("arg", nargs="*", help="set-env 의 KEY=VALUE 또는 upload-fonts 의 글꼴 파일들")
     ap.add_argument("--allow-unpushed", action="store_true", help="origin/main 에 없는 커밋도 배포")
     ap.add_argument("-n", type=int, default=50, help="logs 줄 수")
     ap.add_argument("--config", default=str(CONFIG))
@@ -408,8 +429,10 @@ def main(argv=None):
             cmd_logs(cfg, args.n)
         elif args.command == "set-token":
             cmd_set_token(cfg, read_token())
+        elif args.command == "upload-fonts":
+            cmd_upload_fonts(cfg, args.arg)
         elif args.command == "set-env":
-            key, _, value = (args.arg or "").partition("=")
+            key, _, value = (args.arg[0] if args.arg else "").partition("=")
             if key == "MM_TOKEN":
                 raise DeployError("토큰은 set-token 으로(표준 입력) 저장하세요.")
             cmd_set_env(cfg, key, value)
