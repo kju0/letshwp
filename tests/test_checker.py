@@ -94,7 +94,7 @@ class CheckerFixtureTest(unittest.TestCase):
         self.assertEqual((a["op"], a["from"], a["to"], a["target_font_registered"]),
                          ("set_char_font", "휴먼명조", "HY헤드라인M", True))
         size = one(self.results, "FONT_SIZE", "1. 현황")
-        self.assertEqual((size["status"], size["current"]["value"], size["expected"]["value"]), ("FAIL", 12.0, 15))
+        self.assertEqual((size["status"], size["current"]["value"], size["expected"]["value"]), ("FAIL", 12.0, 16))   # '1.' = 대제목
         self.assertEqual(size["fix"]["actions"][0]["op"], "set_char_size")
         border = one(self.results, "TABLE_SIDE_BORDER")
         self.assertEqual((border["status"], border["target"]["table_id"], border["fix"]["mode"]), ("FAIL", "T0", "auto"))
@@ -136,9 +136,12 @@ class CheckerFixtureTest(unittest.TestCase):
     def test_font_other_elements_are_human_myeongjo(self):
         # 개정 명세: 소제목 및 기타 요소(표 내부·머리말 등)는 휴먼명조
         ins = copy.deepcopy(self.inspection)
-        para(ins, "1. 현황")["role"].update(role="heading_3", label="소제목")
-        r = one(self.check(ins), "FONT", "1. 현황")
+        para(ins, "기타")["role"].update(role="heading_3", label="소제목", confidence=0.9)
+        r = one(self.check(ins), "FONT", "기타")
         self.assertEqual((r["status"], r["expected"]["value"]), ("PASS", "휴먼명조"))
+        # '1.' 로 시작하는 문단은 분류기 역할과 무관하게 대제목(HY헤드라인M)
+        para(ins, "1. 현황")["role"].update(role="heading_3", label="소제목")
+        self.assertEqual(one(self.check(ins), "FONT", "1. 현황")["expected"]["value"], "HY헤드라인M")
         cell = one(self.results, "FONT", "2024")
         self.assertEqual((cell["status"], cell["current"]["value"], cell["expected"]["value"]),
                          ("FAIL", "맑은 고딕", "휴먼명조"))

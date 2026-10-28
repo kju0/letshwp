@@ -15,10 +15,12 @@
 
 import copy
 import re
+from pathlib import Path
 from collections import Counter, OrderedDict, defaultdict
 
 from hwpx_analysis.hierarchy import (annotate_hierarchy, item_above_spacing, bullet_above_spacing, detect_bullet,
                                      note_marker_of, LEVEL_EXAMPLE)
+from hwpx_analysis.fontmetrics import FontRegistry, default_font_dir
 
 PASS, FAIL, UNKNOWN, SKIP = "PASS", "FAIL", "UNKNOWN", "SKIP"
 
@@ -56,6 +58,11 @@ class Doc:
         self.paragraphs = copy.deepcopy(inspection.get("paragraphs") or [])
         sp = config["rules"].get("PARA_SPACING") or {}
         self.hierarchy_summary = annotate_hierarchy(self.paragraphs, sp.get("bullet_order"), sp.get("note_markers"))
+        # 요구사항 3 용어 정의: '1. 2. …'로 시작하면 대제목, '가. 나. …'로 시작하면 중제목.
+        # 분류기의 heading_1/2 는 문서 안 번호 순위로 정해지므로(Ⅰ. 가 있으면 1. 이 중제목이 됨) 번호 기준 역할을 따로 둔다.
+        for p in self.paragraphs:
+            h = p.get("hierarchy") or {}
+            p["spec_role"] = {1: "heading_1", 2: "heading_2"}.get(h.get("level")) if h.get("kind") == "item" else None
         self.doc_type = doc_type if doc_type is not None else config.get("document_type")
         self.doc_type_source = ("CLI 지정" if doc_type is not None else
                                 "설정 파일" if config.get("document_type") else "미지정")
@@ -69,6 +76,11 @@ class Doc:
         # FONT_SIZE 규칙이 채우는 '수정 후 글자 크기' (문단 index -> {charPr id: pt}).
         # 내어쓰기 폭 추정은 글자 크기가 바뀔 문단에서 수정 후 크기로 계산해야 하므로 RULES 순서상 FONT_SIZE 가 먼저 돈다.
         self.font_size_targets = {}
+        # 내어쓰기 폭 계산용 글꼴 폭 표: 글꼴 폴더(설정 HANGING_INDENT.font_dir > 환경 변수 LETSHWP_FONT_DIR > <저장소>/fonts)
+        hi = config["rules"].get("HANGING_INDENT") or {}
+        root = Path(__file__).resolve().parent.parent.parent
+        self.font_registry = FontRegistry(hi.get("font_dir") or default_font_dir(root))
+        self.missing_fonts = set()
 
     def rule_cfg(self, rule_id):
         return self.cfg["rules"][rule_id]
@@ -115,8 +127,14 @@ def target_of(p):
     return t
 
 
+SPEC_ROLE_LABEL = {"heading_1": "대제목", "heading_2": "중제목"}
+
+
 def role_of(p):
     r = p["role"]
+    if p.get("spec_role"):
+        return {"role": p["spec_role"], "label": SPEC_ROLE_LABEL[p["spec_role"]], "confidence": 1.0,
+                "source": "항목 번호 기준(1. → 대제목, 가. → 중제목; 분류기 추정 '%s')" % r["label"]}
     out = {"role": r["role"], "label": r["label"], "confidence": r["confidence"], "source": ROLE_SOURCE}
     if r.get("unclassified_reason"):
         out["unclassified_reason"] = r["unclassified_reason"]
@@ -175,14 +193,15 @@ def gate_by_role(doc, p, rule_id):
     """역할별 표준값 결정.
     반환: ("check", 표준값) | ("unknown_role", 사유) | ("undecided", 사유) | ("skip", 사유)"""
     rc = doc.rule_cfg(rule_id)
-    role = p["role"]["role"]
+    role = p.get("spec_role") or p["role"]["role"]
     by_role = rc.get("by_role") or {}
     if role in STRUCTURAL_SKIP_ROLES and role not in by_role:
         return "skip", STRUCTURAL_SKIP_ROLES[role]
-    if role == "unclassified":
-        return "unknown_role", "역할 미분류: %s" % (p["role"].get("unclassified_reason") or "근거 부족")
-    if p["role"]["confidence"] < doc.role_min:
-        return "unknown_role", "역할 신뢰도 %.2f < 기준 %.2f" % (p["role"]["confidence"], doc.role_min)
+    if not p.get("spec_role"):
+        if role == "unclassified":
+            return "unknown_role", "역할 미분류: %s" % (p["role"].get("unclassified_reason") or "근거 부족")
+        if p["role"]["confidence"] < doc.role_min:
+            return "unknown_role", "역할 신뢰도 %.2f < 기준 %.2f" % (p["role"]["confidence"], doc.role_min)
     if role in by_role and by_role[role] is not None:
         return "check", by_role[role]
     undecided = rc.get("undecided_roles") or {}
@@ -221,7 +240,7 @@ def _role_paragraph_rule(doc, rule_id, current_fn, compare_fn, actions_fn):
                                        unknown_reason="Inspector 결과에 해당 서식값이 없음",
                                        needed_info="해당 문단의 서식 정의(paraPr/charPr)"))
             continue
-        current["role_label"] = p["role"]["label"]
+        current["role_label"] = role_of(p)["label"]
         if decision == "unknown_role":
             results.append(make_result(doc, rule_id, UNKNOWN, "역할이 불확실해 적용할 표준값을 정할 수 없음",
                                        target_of(p), role_of(p), current, unknown_reason=value,
@@ -463,7 +482,7 @@ def rule_font_size(doc):
     for p in doc.paragraphs:
         if p.get("is_empty") or p["role"]["role"] in EXCLUDED_ROLES:
             continue
-        role = p["role"]["role"]
+        role = p.get("spec_role") or p["role"]["role"]
         ctx = p["context"]
         key = (ctx.get("container"), ctx.get("table_id"), ctx.get("object_id"))
         text = p.get("text") or ""
@@ -477,7 +496,7 @@ def rule_font_size(doc):
             current = {"value": distinct[0] if len(distinct) == 1 else distinct,
                        "display": ", ".join("%gpt" % v for v in distinct) + (" (혼재)" if len(distinct) > 1 else ""),
                        "source": VALUE_SOURCE + " - charPr@height", "refs": {"char_pr_sizes": sizes},
-                       "role_label": p["role"]["label"]}
+                       "role_label": role_of(p)["label"]}
         expected_pt, basis, allowed, unknown = None, None, (), None
         if role == "toc":
             heading = bool(TOC_HEADING_TEXT.match(text))
@@ -485,6 +504,14 @@ def rule_font_size(doc):
             basis = "목차 %s" % ("제목" if heading else "항목(하위 제목·붙임·별첨)")
         elif is_note or role == "note":
             prev = last_size.get(key)
+            ps = h.get("previous_paragraph")
+            prev_p = doc.paragraphs[ps] if ps is not None else None
+            under_table = bool(prev_p and (prev_p.get("hierarchy") or {}).get("kind") == "object"
+                               and any(str(o).startswith("T") for o in prev_p.get("objects") or []))
+            if under_table:
+                # 표 바로 아래 주석은 '바로 위 문장 -2pt' 규칙에서 제외(2026-10-28 사용자 결정)
+                skipped.append((p, "표 바로 아래의 참고·주석은 글자 크기 규칙(바로 위 문장 -2pt)에서 제외"))
+                continue
             if not is_note:
                 unknown = ("'*'·'※' 로 시작하지 않는 참고·주석 문단의 글자 크기 기준은 요구사항에 없음", "주석 기호 없는 참고 문단의 기준")
             elif prev is None:
@@ -503,10 +530,12 @@ def rule_font_size(doc):
         elif role == "unclassified":
             unknown = ("역할 미분류: %s" % (p["role"].get("unclassified_reason") or "근거 부족"), "문단 역할 확정")
         elif role in by_role:
-            if p["role"]["confidence"] < doc.role_min:
-                unknown = ("역할 신뢰도 %.2f < 기준 %.2f" % (p["role"]["confidence"], doc.role_min), "문단 역할 확정")
+            if not p.get("spec_role"):
+                # 번호 없이 제목으로 '추정'된 문단은 크기를 바꾸면 추정 역할이 바뀔 수 있어 기준을 적용하지 않는다
+                unknown = ("번호 없이 %s(으)로 추정된 문단 - 글자 크기 기준은 '1.'/'가.' 로 시작하는 대제목·중제목에만 적용" % p["role"]["label"],
+                           "문단이 대제목/중제목인지 확인(번호 표기)")
             else:
-                expected_pt, basis = by_role[role], p["role"]["label"]
+                expected_pt, basis = by_role[role], role_of(p)["label"]
         elif role in undecided:
             unknown = (undecided[role], "FORMAT_SPEC.md 에 해당 역할의 표준값 정의")
         else:
@@ -754,11 +783,13 @@ def _indent_label(v):
     return "내어쓰기 없음(0pt)"
 
 
-# 글자 수 근사에서 '전각(1칸)' 으로 보는 문자 범위: 한글 음절·자모, 로마 숫자(Ⅰ), 원·괄호 숫자, 도형(□○ 등),
+# 글자 수 근사(글꼴 파일이 없을 때)에서 '전각(1칸)' 으로 보는 문자 범위: 한글 음절·자모, 로마 숫자(Ⅰ), 원·괄호 숫자, 도형(□○ 등),
 # 기타 기호, CJK 기호·전각 문자, ※, 한자
 FULL_WIDTH_RANGES = ((0xAC00, 0xD7A3), (0x1100, 0x11FF), (0x3130, 0x318F), (0x2160, 0x217F), (0x2460, 0x24FF), (0x25A0, 0x25FF),
                      (0x2600, 0x26FF), (0x3000, 0x303F), (0x3200, 0x32FF), (0xFF01, 0xFF60), (0x203B, 0x203B),
                      (0x4E00, 0x9FFF))
+# 한글(HWP)의 글꼴 언어 슬롯 대응(가정): 한글 음절·자모 → hangul, ASCII → latin, 한자 → hanja, 그 외 기호(□ ※ ① ․ 등) → symbol
+SYMBOL_RANGES = ((0x2000, 0x2BFF), (0x3000, 0x303F), (0x3200, 0x33FF), (0xFF01, 0xFF60), (0x2E80, 0x2FFF))
 
 
 def char_width_class(ch):
@@ -768,21 +799,30 @@ def char_width_class(ch):
         return None
     if 0x20 <= o <= 0x7E or ch == "\u00a0":
         return "half", "latin"
-    if any(a <= o <= b for a, b in FULL_WIDTH_RANGES):
+    if 0xAC00 <= o <= 0xD7A3 or 0x1100 <= o <= 0x11FF or 0x3130 <= o <= 0x318F:
         return "full", "hangul"
+    if 0x4E00 <= o <= 0x9FFF:
+        return "full", "hanja"
+    if any(a <= o <= b for a, b in SYMBOL_RANGES):
+        return "full", "symbol"
+    if any(a <= o <= b for a, b in FULL_WIDTH_RANGES):
+        return "full", "symbol"
     return None
 
 
 def _width_rule_text(rc):
     we = rc.get("width_estimate") or {}
-    return "한글·기호 %g칸, 공백·숫자·영문·괄호 %g칸, 1칸 = 글자 크기" % (we.get("full_em", 1.0), we.get("half_em", 0.5))
+    return "글꼴 파일의 글자 폭 × 글자 크기 × 장평 + 자간(글꼴 없는 글자는 한글·기호 %g칸, 공백·숫자·영문 %g칸 근사)" % (
+        we.get("full_em", 1.0), we.get("half_em", 0.5))
 
 
 def estimate_prefix_width(doc, p, n):
-    """문단 앞 n 글자(앞 공백 + 번호·기호 + 뒤 공백)의 폭(pt)을 글자 수로 근사한다.
-    각 글자는 자기 run 의 글자 모양(크기·장평·자간)을 쓴다. 장평은 자동 수정 대상 글자 모양이면 수정 후 표준값으로,
-    글자 크기는 FONT_SIZE 규칙이 바꿀 예정이면 그 목표값으로 계산한다(Formatter 가 함께 바꾸므로).
-    자간은 수정하지 않으므로 문서의 실제 값을 쓴다. 반환: ((폭, 내역), None) 또는 (None, 사유)"""
+    """문단 앞 n 글자(앞 공백 + 번호·기호 + 뒤 공백)의 폭(pt)을 계산한다.
+    글자마다 자기 run 의 글자 모양(글꼴·크기·장평·자간)과 언어 슬롯을 쓴다.
+    폭 = 글꼴 파일의 글자 폭(em) × 크기 × 장평/100 + 크기 × 자간/100 (HWP 자간은 글자 크기 대비 %).
+    글꼴 파일이 없거나 글꼴에 글자가 없으면 글자 수 근사(1칸/0.5칸)로 대신하고 approx 목록에 남긴다.
+    장평은 자동 수정 대상 글자 모양이면 수정 후 표준값, 글자 크기는 FONT_SIZE 규칙의 목표값, 자간은 실제값.
+    반환: ((폭, 내역, approx 목록), None) 또는 (None, 사유)"""
     rc = doc.rule_cfg("HANGING_INDENT")
     we = rc.get("width_estimate") or {}
     em = {"full": we.get("full_em", 1.0), "half": we.get("half_em", 0.5)}
@@ -796,7 +836,7 @@ def estimate_prefix_width(doc, p, n):
         owner.extend([run.get("char_pr_id")] * (run.get("chars") or 0))
     if len(owner) < n:
         return None, "run 별 글자 수 정보가 문단 텍스트와 맞지 않음"
-    total, parts = 0.0, []
+    total, parts, approx = 0.0, [], []
     for i, ch in enumerate(text[:n]):
         cls = char_width_class(ch)
         if cls is None:
@@ -813,10 +853,21 @@ def estimate_prefix_width(doc, p, n):
         fixed = owner[i] in visible
         ratio = std_ratio if fixed and std_ratio is not None else (cp.get("ratio") or {}).get(lang, 100)
         spacing = std_spacing if fixed and std_spacing is not None else (cp.get("spacing") or {}).get(lang, 0)
-        w = size * em[kind] * ratio / 100.0 * (1 + spacing / 100.0)
+        face = (cp.get("font_face") or {}).get(lang)
+        font = doc.font_registry.get(face) if face else None
+        adv = font.advance_em(ch) if font else None
+        label = "공백" if ch == " " else ch
+        if adv is None:
+            adv = em[kind]
+            why = ("글꼴 파일 없음: %s" % face) if font is None else ("글꼴에 글자 없음: %s" % face)
+            if font is None and face:
+                doc.missing_fonts.add(face)
+            approx.append("%s(%s)" % (label, why))
+            label += "*"
+        w = size * adv * ratio / 100.0 + size * spacing / 100.0
         total += w
-        parts.append("%s %gpt" % ("공백" if ch == " " else ch, round(w, 2)))
-    return (total, parts), None
+        parts.append("%s %gpt" % (label, round(w, 2)))
+    return (total, parts, approx), None
 
 
 def rule_hanging_indent(doc):
@@ -888,11 +939,11 @@ def rule_hanging_indent(doc):
                                        needed_info="문단 모양 정의" if indent is None else "해당 문자의 폭 기준(설정 HANGING_INDENT.width_estimate)",
                                        observation=lines_note, extra=sub))
             continue
-        width, parts = est
+        width, parts, approx = est
         target = -round(width, 2)
-        expected = {"value": {"indent_pt": target},
-                    "display": "%s ('%s' 추정 폭: %s)" % (_indent_label(target), prefix.replace("\t", "→"), " + ".join(parts)),
-                    "basis": rc["spec_text"] + " / 폭은 글자 수 근사(%s)" % _width_rule_text(rc)}
+        expected = {"value": {"indent_pt": target, "approximated": bool(approx)},
+                    "display": "%s ('%s' 폭: %s)" % (_indent_label(target), prefix.replace("\t", "→"), " + ".join(parts)),
+                    "basis": rc["spec_text"] + " / " + _width_rule_text(rc)}
         tol = (rc.get("width_estimate") or {}).get("tolerance_pt", 1.0)
         ok = abs(indent - target) <= tol
         reason = "내어쓰기 %s 기준 %s (허용 오차 ±%gpt)" % (
@@ -904,7 +955,19 @@ def rule_hanging_indent(doc):
             "note": "목표값으로 설정(누적 없음). hp:switch case 에는 pt×100, default 에는 그 2배 값. 왼쪽 여백은 바꾸지 않음"}]
         results.append(make_result(doc, "HANGING_INDENT", PASS if ok else FAIL, reason, target_of(p), role_of(p),
                                    current, expected, fix_actions=actions,
-                                   observation="%s. 폭은 글꼴 실측이 아닌 글자 수 근사값" % lines_note, extra=sub))
+                                   observation="%s. %s" % (lines_note, ("글꼴 파일이 없어 글자 수 근사로 계산한 글자(*): " + ", ".join(approx))
+                                                          if approx else "폭은 글꼴 파일의 글자 폭으로 계산"), extra=sub))
+    reg = doc.font_registry
+    if results:
+        if doc.missing_fonts:
+            results.append(make_result(doc, "HANGING_INDENT", UNKNOWN, "일부 글자의 폭을 글꼴 파일 없이 근사했음",
+                                       unknown_reason="글꼴 폴더(%s)에 없는 글꼴: %s" % (reg.dir, ", ".join(sorted(doc.missing_fonts))),
+                                       needed_info="해당 글꼴의 .ttf/.ttc 파일을 글꼴 폴더에 추가", extra={"sub_item": "글꼴 폭"}))
+        elif reg.files:
+            results.append(make_result(doc, "HANGING_INDENT", PASS, "모든 번호·기호 부분의 폭을 글꼴 파일로 계산",
+                                       current={"value": reg.files, "display": "글꼴 파일 %d개: %s" % (len(reg.files), ", ".join(reg.files)), "source": str(reg.dir)},
+                                       expected={"value": "font_metrics", "display": "글꼴 폭 기준", "basis": rc["spec_text"]},
+                                       extra={"sub_item": "글꼴 폭"}))
     return results + skip_group(doc, "HANGING_INDENT", skipped)
 
 

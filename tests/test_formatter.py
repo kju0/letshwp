@@ -245,7 +245,7 @@ class FormatHwpxTest(unittest.TestCase):
         title = next(p for p in b["paragraphs"] if p["text"].startswith("보고서 제목"))
         self.assertEqual(title["char_format"]["spacing_hangul"], -2)                      # 원래 자간 유지
         heading = next(p for p in b["paragraphs"] if p["text"].startswith("1. 현황"))
-        self.assertEqual((heading["char_format"]["size_pt"], heading["char_format"]["font_hangul"]), (15.0, "HY헤드라인M"))
+        self.assertEqual((heading["char_format"]["size_pt"], heading["char_format"]["font_hangul"]), (16.0, "HY헤드라인M"))
 
     def test_verification_failure_discards_output(self):
         fail = {"all_ok": False, "checks": [{"name": "강제 실패", "status": "FAIL", "detail": "테스트"}]}
