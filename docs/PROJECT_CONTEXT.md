@@ -75,6 +75,10 @@ Claude Code 는 세션을 시작할 때 이 문서를 먼저 읽는다. 개발 �
    - 봇: WebSocket 으로 DM·멘션 글 수신 → 첨부 hwpx 저장 → run_fix/run_test 를 별도 프로세스로 실행 → 스레드 답장(수정본·보고서 첨부). 작업은 한 번에 하나.
    - 배포: push 된 커밋만. 로컬 테스트 → git archive 업로드 → 서버 테스트 → 링크 교체·재시작 → status.json 의 connected 확인, 실패 시 직전 릴리스로 자동 복구. 배포본은 DEPLOY_VERSION.json 으로 코드 버전 기록.
    - mmctl 로컬 모드로는 봇 계정 생성이 안 된다 → 시스템 콘솔에서 생성, 토큰은 `deploy.py set-token`, 팀·채널 추가는 `deploy.py join-bot`.
+   - 봇 계정은 관리자 jeong 소유로 생성(일반 계정에는 Bot Accounts 메뉴가 없음). 첫 배포 2026-10-28 릴리스 20261028-201348_b64d783, 서버 테스트 140개 통과, 서버에서 test1 수정 FAIL 46 → 5 확인.
+   - Mattermost 실사용 확인(2026-10-28): 로봇집사 보고서 DM → 수정 FAIL 40 → 0, 검증 통과.
+   - macOS 업로드 파일명은 NFD 로 오므로 봇이 NFC 로 정규화한다.
+   - 토큰이 대화에 노출됐으므로 동작 확인 후 새 토큰으로 교체 예정.
 
 ## 4. 핵심 기술 판단 (근거: docs/HWPX_STRUCTURE.md)
 - charPr/paraPr ID 하나가 완전한 속성 집합이다. 스타일 상속을 계산할 필요가 없다.
