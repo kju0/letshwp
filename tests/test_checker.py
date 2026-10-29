@@ -143,6 +143,9 @@ class CheckerFixtureTest(unittest.TestCase):
         para(ins, "기타")["role"].update(role="heading_3", label="소제목", confidence=0.9)
         r = one(self.check(ins), "FONT", "기타")
         self.assertEqual((r["status"], r["expected"]["value"]), ("PASS", "휴먼명조"))
+        # '1.' 로 시작하는 문단은 분류기 역할과 무관하게 대제목(HY헤드라인M)
+        para(ins, "1. 현황")["role"].update(role="heading_3", label="소제목")
+        self.assertEqual(one(self.check(ins), "FONT", "1. 현황")["expected"]["value"], "HY헤드라인M")
         cell = one(self.results, "FONT", "2024")
         self.assertEqual((cell["status"], cell["current"]["value"], cell["expected"]["value"]),
                          ("FAIL", "맑은 고딕", "휴먼명조"))
@@ -191,9 +194,7 @@ class CheckerFixtureTest(unittest.TestCase):
         self.assertEqual((cell["status"], cell["expected"]["value"]["value"]), ("FAIL", 160))   # 표 셀 내부 160% 유지
         cap = one(self.results, "LINE_SPACING", "<표 1>")
         self.assertEqual((cap["status"], cap["expected"]["value"]["value"]), ("FAIL", 110))
-        roman = one(self.results, "FONT", "Ⅰ.")
-        self.assertEqual(roman["status"], "UNKNOWN")                                        # 'Ⅰ.' 은 1./가. 형식이 아님
-        self.assertIn("번호", roman["unknown_reason"])
+        self.assertEqual(one(self.results, "FONT", "Ⅰ.")["expected"]["value"], "HY헤드라인M")
         self.assertEqual(one(self.results, "FONT", "1. 현황")["expected"]["value"], "HY헤드라인M")
         self.assertEqual(one(self.results, "PARA_ALIGN", "연도별")["status"], "PASS")       # 표 셀 가운데
         self.assertEqual(one(self.results, "PARA_ALIGN", "2024")["status"], "PASS")        # 숫자 셀 가운데 허용

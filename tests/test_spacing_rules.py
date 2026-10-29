@@ -21,7 +21,12 @@ from hwpx_analysis.classifier import detect_list_marker, ROLE_LABELS  # noqa: E4
 from hwpx_analysis.hierarchy import annotate_hierarchy, item_above_spacing, bullet_above_spacing  # noqa: E402
 
 CONFIG, CONFIG_PATH = load_config()
+# 글꼴 파일 유무와 관계없이 같은 결과가 나오도록 글꼴 폴더를 비운다(글자 수 근사). 글꼴 폭은 test_fontmetrics 에서 검사
+CONFIG["rules"]["HANGING_INDENT"]["font_dir"] = "/nonexistent-letshwp-fonts"
 SPACING = CONFIG["rules"]["PARA_SPACING"]
+
+
+FACES = {"hangul": "휴먼명조", "latin": "휴먼명조", "symbol": "휴먼명조"}
 
 
 def _cid(size):
@@ -55,14 +60,14 @@ def P(text, space_before=0.0, role=None, indent=0.0, lines=1, page_break=False, 
 
 def inspection(paragraphs, app="Hancom Office Hangul", tables=None, para_props=None):
     char_props = {
-        "0": {"id": 0, "font_face": {"hangul": "휴먼명조"}, "size_pt": 14.0,
+        "0": {"id": 0, "font_face": FACES, "size_pt": 14.0,
               "ratio": {"hangul": 100, "latin": 100}, "spacing": {"hangul": 0, "latin": 0}},
         # 1: 공백만 있는 run 용 10pt 자간 -10%
-        "1": {"id": 1, "font_face": {"hangul": "휴먼명조"}, "size_pt": 10.0,
+        "1": {"id": 1, "font_face": FACES, "size_pt": 10.0,
               "ratio": {"hangul": 100, "latin": 100}, "spacing": {"hangul": -10, "latin": -10}},
         # 2: 자간 -4% 글자 모양(자간은 수정하지 않으므로 실제값으로 폭 계산)
-        "2": {"id": 2, "font_face": {"hangul": "휴먼명조"}, "size_pt": 14.0,
-              "ratio": {"hangul": 100, "latin": 100}, "spacing": {"hangul": -4, "latin": -4}}}
+        "2": {"id": 2, "font_face": FACES, "size_pt": 14.0,
+              "ratio": {"hangul": 100, "latin": 100, "symbol": 100}, "spacing": {"hangul": -4, "latin": -4, "symbol": -4}}}
     for i, p in enumerate(paragraphs):
         p["index"] = i
         p["path"] = "sec0/p%d" % i
@@ -71,7 +76,7 @@ def inspection(paragraphs, app="Hancom Office Hangul", tables=None, para_props=N
         cf = p["char_format"]
         if cf["char_pr_id"] >= 100:
             char_props.setdefault(str(cf["char_pr_id"]), {
-                "id": cf["char_pr_id"], "font_face": {"hangul": "휴먼명조"}, "size_pt": cf["size_pt"],
+                "id": cf["char_pr_id"], "font_face": dict(FACES), "size_pt": cf["size_pt"],
                 "ratio": {"hangul": 100, "latin": 100}, "spacing": {"hangul": 0, "latin": 0}})
     return {
         "schema_version": "1.0", "paragraphs": paragraphs, "tables": tables or [],
@@ -308,8 +313,8 @@ class HangingIndentTest(unittest.TestCase):
         return out[(i, "둘째 줄 정렬")], res
 
     def test_width_estimate_by_char_count(self):
-        # 14pt 기준: 한글·기호·※ 1칸 = 14pt, 공백·숫자·괄호·마침표·* 0.5칸 = 7pt.
-        # '1.'(대제목 16pt)·'가.'(중제목 15pt) 문단은 글자 크기 규칙의 목표값으로 계산한다
+        # 14pt 기준: 한글·기호·※ 1칸 = 14pt, 공백·숫자·괄호·마침표·* 0.5칸 = 7pt
+        # '1.'/'가.' 는 대제목 16pt/중제목 15pt 로 바뀔 예정이므로 그 크기로 계산한다
         cases = [("□ 항목", 21.0), ("  □ 앞 공백", 35.0), ("ㅇ 세부", 21.0), ("- 하위", 14.0),
                  ("1) 번호", 21.0), ("가. 번호", 30.0), ("1. 번호", 24.0), ("※ 주석", 21.0), ("* 주석", 14.0)]
         for text, width in cases:
@@ -351,12 +356,12 @@ class HangingIndentTest(unittest.TestCase):
         p["runs"] = [{"char_pr_id": 2, "chars": len(p["text"])}]
         p["char_format"]["char_pr_id"] = 2
         r, _ = self._align([p])
-        # 자간은 수정하지 않으므로 -4% 그대로: (14 + 7) × 0.96 = 20.16
-        self.assertEqual(r["expected"]["value"]["indent_pt"], -20.16)
+        # 자간은 수정하지 않으므로 -4% 그대로(글자마다 크기 × -4% 를 더함): (14 - 0.56) + (7 - 0.56) = 19.88
+        self.assertEqual(r["expected"]["value"]["indent_pt"], -19.88)
 
     def test_width_uses_font_size_after_fix(self):
         # 대제목 '1. 개요' 가 14pt → 16pt 로 바뀔 예정이면 내어쓰기 폭도 16pt 기준(1. = 8+8+8)
-        r, res = self._align([P("1. 개요", role="heading_1", size=14)])
+        r, res = self._align([P("1. 개요", size=14)])
         self.assertEqual(r["expected"]["value"]["indent_pt"], -24.0)
         self.assertTrue(any(x["op"] == "set_char_size" for x in res["fix_plan"]["role_based_actions"]))
 
@@ -365,7 +370,7 @@ class HangingIndentTest(unittest.TestCase):
         p["runs"] = [{"char_pr_id": 1, "chars": 2}, {"char_pr_id": 0, "chars": len(p["text"]) - 2}]
         p["char_format_mixed_detail"] = [{"char_pr_ids": [0]}]
         r, _ = self._align([p])
-        self.assertEqual(r["expected"]["value"]["indent_pt"], -30.0)   # 2×10×0.5×0.9 = 9, □ 14, 공백 7
+        self.assertEqual(r["expected"]["value"]["indent_pt"], -29.0)   # 공백 2개 × (5 - 1) = 8, □ 14, 공백 7
 
     def test_tab_or_unknown_char_is_unknown(self):
         r, _ = self._align([P("□\t탭 뒤 본문")])
@@ -385,7 +390,7 @@ def font_size(paragraphs):
 
 class FontSizeTest(unittest.TestCase):
     def test_headings(self):
-        by_idx, res = font_size([P("1. 대제목", role="heading_1", size=14), P("가. 중제목", role="heading_2", size=15)])
+        by_idx, res = font_size([P("1. 대제목", size=14), P("가. 중제목", size=15)])
         self.assertEqual((by_idx[0]["status"], by_idx[0]["expected"]["value"]), ("FAIL", 16))
         a = by_idx[0]["fix"]["actions"][0]
         self.assertEqual((a["op"], a["from"], a["to"]), ("set_char_size", 14.0, 16))
@@ -396,20 +401,21 @@ class FontSizeTest(unittest.TestCase):
         by_idx, _ = font_size([P("보고서 제목", role="document_title", size=22, confidence=0.4), P("일반 본문", size=14, confidence=0.4)])
         self.assertEqual([by_idx[i]["status"] for i in (0, 1)], ["UNKNOWN", "UNKNOWN"])
 
-    def test_heading_level_follows_number_form(self):
-        # 요구사항 3 용어 정의: '1.' = 대제목 16pt, '가.' = 중제목 15pt. 분류기 역할·신뢰도보다 번호 형식이 우선한다
-        by_idx, _ = font_size([P("1. 대제목", role="heading_2", size=15), P("가. 중제목", role="heading_1", size=16),
-                               P("2. 본문으로 분류된 대제목", role="body", size=14, confidence=0.4),
-                               P("금융결제원 IT기획부장", role="heading_1", size=20)])
+
+    def test_number_defines_heading_role(self):
+        # '1.'/'가.' 는 분류기 역할·신뢰도와 무관하게 대제목/중제목 기준(요구사항 3 용어 정의)
+        by_idx, res = font_size([P("1. 대제목", size=14, confidence=0.4), P("가. 중제목", role="unclassified", size=14)])
         self.assertEqual((by_idx[0]["status"], by_idx[0]["expected"]["value"]), ("FAIL", 16))
         self.assertEqual((by_idx[1]["status"], by_idx[1]["expected"]["value"]), ("FAIL", 15))
-        self.assertEqual((by_idx[2]["status"], by_idx[2]["expected"]["value"]), ("FAIL", 16))
-        self.assertEqual(by_idx[2]["role"]["numbered_heading"], "heading_1")
-        self.assertEqual(by_idx[3]["status"], "UNKNOWN")          # 번호 없는 '대제목' 추정 문단은 바꾸지 않는다
-        self.assertIn("번호", by_idx[3]["unknown_reason"])
-        by_idx, _ = rule_results([P("1. 대제목", role="body", size=16), P("Ⅰ. 로마 번호", role="heading_1", size=16)], "FONT")
-        self.assertEqual(by_idx[0]["expected"]["value"], "HY헤드라인M")
-        self.assertEqual(by_idx[1]["status"], "UNKNOWN")
+        self.assertEqual(by_idx[0]["role"]["label"], "대제목")
+        font = {r["target"]["paragraph_index"]: r for r in res["results"] if r["rule_id"] == "FONT" and r["target"].get("type") == "paragraph"}
+        self.assertEqual(font[1]["expected"]["value"], "HY헤드라인M")
+
+    def test_heading_without_number_is_unknown(self):
+        for conf in (0.4, 0.95):
+            by_idx, _ = font_size([P("번호 없는 제목", role="heading_1", size=14, confidence=conf)])
+            self.assertEqual(by_idx[0]["status"], "UNKNOWN")
+            self.assertIn("번호 없이", by_idx[0]["unknown_reason"])
 
     def test_note_is_two_points_smaller_than_previous(self):
         by_idx, _ = font_size([P("본문 문장이다.", size=14), P("※ 주석", size=12), P("* 둘째 주석", size=12), P("※ 큰 주석", size=14)])
@@ -418,6 +424,17 @@ class FontSizeTest(unittest.TestCase):
         self.assertEqual((by_idx[3]["status"], by_idx[3]["expected"]["value"]), ("FAIL", 12))
         by_idx, _ = font_size([P("※ 앞 문단 없는 주석", size=12)])
         self.assertEqual(by_idx[0]["status"], "UNKNOWN")
+
+    def test_note_under_table_is_excluded(self):
+        paras = [P("본문 문장이다.", size=14), P("", objects=["T0"]), P("※ 표 아래 주석", size=14), P("※ 둘째 주석", size=14)]
+        by_idx, res = font_size(paras)
+        self.assertNotIn(2, by_idx)                                   # 표 바로 아래 주석은 제외(SKIP 묶음)
+        self.assertEqual((by_idx[3]["status"], by_idx[3]["expected"]["value"]), ("FAIL", 12))   # 그다음 주석은 본문 기준
+        skips = [r for r in res["results"] if r["rule_id"] == "FONT_SIZE" and r["status"] == "SKIP"]
+        self.assertTrue(any(2 in r["target"]["paragraph_indices"] and "표 바로 아래" in r["unknown_reason"] for r in skips))
+        paras = [P("본문 문장이다.", size=14), P("", objects=["P0"]), P("※ 그림 아래 주석", size=14)]
+        by_idx, _ = font_size(paras)
+        self.assertEqual(by_idx[2]["status"], "FAIL")                 # 그림 아래는 제외 대상 아님
 
     def test_square_bullet_14_or_15_after_heading(self):
         by_idx, _ = font_size([P("1. 대제목", role="heading_1", size=16), P("□ 바로 다음 항목", size=15),
