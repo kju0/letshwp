@@ -161,7 +161,10 @@ class FormatHwpxTest(unittest.TestCase):
         self.assertTrue(res["ok"], res["errors"])
         self.assertEqual(sha256_of(self.src), before)
         self.assertGreater(res["summary_before"]["FAIL"], 0)
-        self.assertEqual(res["summary_after"]["FAIL"], 0)
+        after = json.loads((self.dir / "out" / "check_after.json").read_text(encoding="utf-8"))
+        left = [(r["rule_id"], r["target"].get("text_excerpt")) for r in after["results"] if r["status"] == "FAIL"]
+        self.assertEqual(left, [("ITEM_NUMBER", "Ⅰ. 추진 배경")])      # 표준 밖 번호는 검사만(수동)
+        self.assertFalse(any(r["fix"]["possible"] for r in after["results"] if r["status"] == "FAIL"))
         self.assertEqual(res["fix"]["not_applied"], [])
         self.assertTrue(all(c["status"] == "PASS" for c in res["verification"]["checks"]))
         out = self.dir / "out"
@@ -183,10 +186,13 @@ class FormatHwpxTest(unittest.TestCase):
                 if n not in ("Contents/header.xml", "Contents/section0.xml"):
                     self.assertEqual(z1.read(n), z2.read(n), n)
             sec1, sec2 = z1.read("Contents/section0.xml"), z2.read("Contents/section0.xml")
-        # 본문 XML 은 참조 id 속성만 바뀌고 길이 차이는 id 자릿수 차이뿐이어야 한다
+        # 본문 XML 은 참조 id 속성과 추가된 쪽 번호 컨트롤 외에는 같아야 한다
         import re
         norm = lambda s: re.sub(rb'(charPrIDRef|paraPrIDRef|borderFillIDRef)="\d+"', b"\\1=\"\"", s)  # noqa: E731
+        sec2 = re.sub(rb'<hp:ctrl><hp:pageNum [^>]*/></hp:ctrl>', b"", sec2, count=1)
         self.assertEqual(norm(sec1), norm(sec2))
+        self.assertIn(b'<hp:ctrl><hp:pageNum pos="BOTTOM_CENTER" formatType="DIGIT" sideChar="-"/></hp:ctrl>',
+                      zipfile.ZipFile(fixed).read("Contents/section0.xml"))
 
     def test_shared_definitions_are_cloned_not_modified(self):
         res = self._run()
@@ -411,6 +417,83 @@ class PageBreakFormatTest(unittest.TestCase):
         self.assertEqual(rm.path("sec1/p5"), "sec1/p5")
 
 
+class MarkerAndPageNumberTest(unittest.TestCase):
+    """번호·기호 문자 교정(replace_marker)과 쪽 번호 추가(add_page_number)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.src = self.dir / "doc.hwpx"
+        build_fixture(self.src)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_replace_marker_single_and_split_runs(self):
+        from hwpx_format.apply import op_replace_marker
+        from hwpx_format.ops import OpNotApplicable
+        one = '<hp:p><hp:run charPrIDRef="2"><hp:t>  다. 필요성</hp:t></hp:run></hp:p>'.encode("utf-8")
+        root, _ = scan(one)
+        self.assertEqual(apply_edits(one, op_replace_marker(one, root, {"from": "다.", "to": "나."})).decode("utf-8"),
+                         '<hp:p><hp:run charPrIDRef="2"><hp:t>  다. 필요성</hp:t></hp:run></hp:p>'.replace("다.", "나."))
+        split = ('<hp:p><hp:run charPrIDRef="22"><hp:t> 다</hp:t></hp:run><hp:run charPrIDRef="21"><hp:t>. 디지털</hp:t></hp:run></hp:p>').encode("utf-8")
+        root, _ = scan(split)
+        self.assertEqual(apply_edits(split, op_replace_marker(split, root, {"from": "다.", "to": "나."})).decode("utf-8"),
+                         '<hp:p><hp:run charPrIDRef="22"><hp:t> 나</hp:t></hp:run><hp:run charPrIDRef="21"><hp:t>. 디지털</hp:t></hp:run></hp:p>')
+        lead = ('<hp:p><hp:run charPrIDRef="1"><hp:t>    </hp:t></hp:run><hp:run charPrIDRef="2"><hp:t>- 세부</hp:t></hp:run></hp:p>').encode("utf-8")
+        root, _ = scan(lead)
+        self.assertIn("<hp:t>ㅇ 세부</hp:t>", apply_edits(lead, op_replace_marker(lead, root, {"from": "-", "to": "ㅇ"})).decode("utf-8"))
+        root, _ = scan(split)
+        with self.assertRaises(OpNotApplicable):
+            op_replace_marker(split, root, {"from": "다.", "to": "10."})        # 나뉘어 있고 길이가 다름
+        root, _ = scan(one)
+        with self.assertRaises(OpNotApplicable):
+            op_replace_marker(one, root, {"from": "가.", "to": "나."})         # 첫 글자가 다름
+
+    def test_page_number_added_and_number_fixed_end_to_end(self):
+        import re
+        bad = self.dir / "num.hwpx"
+        with zipfile.ZipFile(self.src) as z, zipfile.ZipFile(bad, "w") as o:
+            for i in z.infolist():
+                data = z.read(i.filename)
+                if i.filename == "Contents/section0.xml":
+                    data = SECTION.replace("1. 현황 분석", "3. 현황 분석").encode("utf-8")
+                o.writestr(i, data)
+        res = format_hwpx(bad, self.dir / "out")
+        self.assertTrue(res["ok"], res["errors"])
+        self.assertEqual(res["fix"]["marker_edits"], [{"index": 3, "from": "3.", "to": "1."}])
+        self.assertEqual(res["fix"]["added_controls"], [{"index": 0, "section": 0, "control": "pageNum"}])
+        after = inspect_hwpx(str(res["output"]))
+        self.assertEqual(after["paragraphs"][3]["text"], "1. 현황 분석")
+        self.assertEqual(after["document"]["sections"][0]["page_numbers"],
+                         [{"paragraph": 0, "pos": "BOTTOM_CENTER", "format": "DIGIT", "side_char": "-"}])
+        self.assertEqual(after["paragraphs"][0]["controls"], ["secPr", "colPr", "header", "pageNum"])   # 구역 설정 run 의 끝에 추가
+        names = {c["name"]: c["status"] for c in res["verification"]["checks"]}
+        self.assertEqual(names["글자 변경은 항목 번호·기호 문자뿐, 추가 요소는 쪽 번호뿐"], "PASS")
+        chk = json.loads((self.dir / "out" / "check_after.json").read_text(encoding="utf-8"))
+        st = {r["rule_id"]: r["status"] for r in chk["results"] if r["rule_id"] in ("PAGE_NUMBER",)}
+        self.assertEqual(st, {"PAGE_NUMBER": "PASS"})
+        self.assertEqual([r["status"] for r in chk["results"] if r["rule_id"] == "ITEM_NUMBER" and r["target"].get("text_excerpt") == "1. 현황 분석"], ["PASS"])
+        # 2회 변환: 쪽 번호·번호 교정 동작 없음
+        res2 = format_hwpx(Path(res["output"]), self.dir / "out2")
+        self.assertTrue(res2["ok"], res2["errors"])
+        self.assertEqual((res2["fix"]["marker_edits"], res2["fix"]["added_controls"]), ([], []))
+
+    def test_existing_other_page_number_is_kept(self):
+        other = self.dir / "pn.hwpx"
+        with zipfile.ZipFile(self.src) as z, zipfile.ZipFile(other, "w") as o:
+            for i in z.infolist():
+                data = z.read(i.filename)
+                if i.filename == "Contents/section0.xml":
+                    data = SECTION.replace('</hp:ctrl></hp:run>', '</hp:ctrl><hp:ctrl><hp:pageNum pos="TOP_RIGHT" formatType="DIGIT" sideChar=""/></hp:ctrl></hp:run>', 1).encode("utf-8")
+                o.writestr(i, data)
+        res = format_hwpx(other, self.dir / "out_pn")
+        self.assertTrue(res["ok"], res["errors"])
+        self.assertEqual(res["fix"]["added_controls"], [])
+        chk = json.loads((self.dir / "out_pn" / "check_after.json").read_text(encoding="utf-8"))
+        self.assertEqual([r["status"] for r in chk["results"] if r["rule_id"] == "PAGE_NUMBER"], ["UNKNOWN"])
+
+
 class RunFixTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -432,7 +515,7 @@ class RunFixTest(unittest.TestCase):
         self.assertIn("run_info.json", names)
         self.assertEqual(sha256_of(self.src), before)
         self.assertEqual(sha256_of(out_dir / "source.hwpx"), before)
-        self.assertEqual(info["check_after"]["FAIL"], 0)
+        self.assertEqual(info["check_after"]["FAIL"], 1)   # 'Ⅰ.' 표준 밖 번호(수동 검토)만 남는다
 
     def test_main_exit_codes(self):
         with mock.patch("sys.stdout"):

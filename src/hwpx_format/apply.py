@@ -54,7 +54,72 @@ def op_delete_empty_paragraph(data, p_el, a):
     return [(p_el.start, p_el.end, b"")]
 
 
-PARAGRAPH_OPS = {"set_page_break": op_set_page_break, "delete_empty_paragraph": op_delete_empty_paragraph}
+def op_replace_marker(data, p_el, a):
+    """문단 첫 글자(앞 공백 다음)의 항목 번호·기호 문자만 바꾼다. 텍스트 불변 원칙의 예외.
+    번호가 여러 run 의 hp:t 에 나뉘어 있으면(예: ' 다' + '. …') 길이가 같을 때 조각별로 바꾼다."""
+    old, new = a["from"], a["to"]
+    segs = []   # (글자 문자열, 바이트 시작) - 문서 순서의 hp:t 본문
+    for t in p_el.iter("t"):
+        inner = data[t.stag_end:t.end]
+        close = inner.rfind(b"</")
+        body = inner[:close] if close >= 0 else inner
+        if b"<" in body:
+            if segs:
+                break
+            raise OpNotApplicable("번호·기호가 있어야 할 hp:t 에 다른 요소가 섞여 있음")
+        segs.append((body.decode("utf-8"), t.stag_end))
+        if sum(len(x) for x, _ in segs) >= len(old) + 64:
+            break
+    if not segs:
+        raise OpNotApplicable("번호·기호가 든 hp:t 가 없음")
+    text = "".join(x for x, _ in segs)
+    stripped = text.lstrip()
+    if not stripped.startswith(old):
+        raise OpNotApplicable("문단 첫 글자가 '%s' 가 아님('%s')" % (old, stripped[:5]))
+    lead = len(text) - len(stripped)
+    # 글자 위치 -> (세그먼트, 세그먼트 안 위치)
+    spans, pos = [], 0
+    for seg_text, seg_start in segs:
+        spans.append((pos, pos + len(seg_text), seg_text, seg_start))
+        pos += len(seg_text)
+    edits = []
+    for s0, e0, seg_text, seg_start in spans:
+        lo, hi = max(s0, lead), min(e0, lead + len(old))
+        if lo >= hi:
+            continue
+        if s0 <= lead and lead + len(old) <= e0:
+            # 한 세그먼트 안에 다 들어 있음: 길이가 달라도 통째로 교체
+            bs = seg_start + len(seg_text[:lead - s0].encode("utf-8"))
+            return [(bs, bs + len(old.encode("utf-8")), new.encode("utf-8"))]
+        if len(old) != len(new):
+            raise OpNotApplicable("번호가 여러 run 에 나뉘어 있고 길이가 달라('%s'→'%s') 바꿀 수 없음" % (old, new))
+        part_old, part_new = old[lo - lead:hi - lead], new[lo - lead:hi - lead]
+        bs = seg_start + len(seg_text[:lo - s0].encode("utf-8"))
+        edits.append((bs, bs + len(part_old.encode("utf-8")), part_new.encode("utf-8")))
+    return edits
+
+
+PARAGRAPH_OPS = {"set_page_break": op_set_page_break, "delete_empty_paragraph": op_delete_empty_paragraph,
+                 "replace_marker": op_replace_marker}
+
+
+def op_add_page_number(data, root, a):
+    """첫 문단의 구역 설정(hp:secPr) run 끝에 쪽 번호 컨트롤을 추가한다(sample_original_wannabe 와 같은 위치). 구조 불변 원칙의 예외."""
+    sec_prs = list(root.iter("secPr"))
+    if not sec_prs:
+        raise OpNotApplicable("hp:secPr 가 없어 쪽 번호를 넣을 위치를 정할 수 없음")
+    run = sec_prs[0].parent
+    if run is None or run.local != "run":
+        raise OpNotApplicable("hp:secPr 가 run 안에 있지 않음")
+    if list(root.iter("pageNum")):
+        raise OpNotApplicable("쪽 번호 컨트롤이 이미 있음")
+    prefix = sec_prs[0].qname.split(":")[0] + ":" if ":" in sec_prs[0].qname else ""
+    to = a["to"]
+    xml = ('<%(p)sctrl><%(p)spageNum pos="%(pos)s" formatType="%(fmt)s" sideChar="%(side)s"/></%(p)sctrl>'
+           % {"p": prefix, "pos": to["pos"], "fmt": to["format"], "side": to["side_char"]}).encode("utf-8")
+    at = run.children[-1].end if run.children else run.stag_end
+    return [(at, at, xml)]
+
 
 
 def select_actions(check):
@@ -156,7 +221,7 @@ def apply_fix_plan(src_path, out_path, inspection, check):
                     raise OpNotApplicable("대상 문단이 지정되지 않음")
                 _run_def_op(header_bytes, defs[kind][did], a)
                 def_actions.append((kind, did, a))
-            elif op in SECTION_OPS:
+            elif op in SECTION_OPS or op == "add_page_number":
                 sec_actions.append(a)
             elif op in PARAGRAPH_OPS:
                 if not a.get("paragraphs"):
@@ -284,12 +349,19 @@ def apply_fix_plan(src_path, out_path, inspection, check):
                 for r in runs:
                     sec_edit_lists[si].append(set_attr_edit(sec_bytes, r, "charPrIDRef", new))
 
+    added_controls = []
     for a in sec_actions:
         si = a.get("section_index")
         try:
             if si is None or si >= len(sections):
                 raise OpNotApplicable("구역 %s 이 없음" % si)
             part, root, _ = sec_scan(si)
+            if a["op"] == "add_page_number":
+                sec_edit_lists[si].extend(op_add_page_number(data[part], root, a))
+                first = next((pp["index"] for pp in paragraphs if pp.get("section") == si and pp["path"] == "sec%d/p0" % si), None)
+                added_controls.append({"index": first, "section": si, "control": "pageNum"})
+                applied.append(dict(a))
+                continue
             page_prs = [e for e in root.iter("pagePr") if e.has_ancestor("secPr")]
             if not page_prs:
                 raise OpNotApplicable("구역 %d 에 hp:secPr/hp:pagePr 가 없음" % si)
@@ -298,7 +370,7 @@ def apply_fix_plan(src_path, out_path, inspection, check):
         except (OpNotApplicable, XmlPatchError) as e:
             not_applied.append(dict(a, reason=str(e)))
 
-    deleted = []
+    deleted, marker_edits = [], []
     for a in para_actions:
         try:
             for pi in a["paragraphs"]:
@@ -306,6 +378,8 @@ def apply_fix_plan(src_path, out_path, inspection, check):
                 sec_edit_lists[si].extend(PARAGRAPH_OPS[a["op"]](data[part], p_el, a))
                 if a["op"] == "delete_empty_paragraph":
                     deleted.append({"index": pi, "path": paragraphs[pi]["path"], "section": si})
+                elif a["op"] == "replace_marker":
+                    marker_edits.append({"index": pi, "from": a["from"], "to": a["to"]})
             applied.append(dict(a))
         except (OpNotApplicable, XmlPatchError, ApplyError) as e:
             not_applied.append(dict(a, reason=str(e)))
@@ -325,6 +399,8 @@ def apply_fix_plan(src_path, out_path, inspection, check):
         ("not_applied", not_applied),
         ("clones", clones),
         ("deleted_paragraphs", deleted),
+        ("marker_edits", marker_edits),
+        ("added_controls", added_controls),
         ("changed_parts", sorted(k for k in new_data if new_data[k] != data[k])),
     ])
 

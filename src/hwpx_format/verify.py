@@ -54,6 +54,8 @@ def verify(src_path, out_path, before_ins, after_ins, before_check, after_check,
     checks = []
     deleted = fix.get("deleted_paragraphs") or []
     rm = Remap(before_ins["paragraphs"], deleted)
+    marker_edits = {m["index"]: (m["from"], m["to"]) for m in fix.get("marker_edits") or []}
+    added_controls = {c["index"]: c["control"] for c in fix.get("added_controls") or [] if c.get("index") is not None}
 
     # 1) 패키지: 엔트리 목록·순서·압축 방식 동일, 바꾼 파트 외에는 바이트 동일
     (e1, d1), (e2, d2) = _zip_entries(src_path), _zip_entries(out_path)
@@ -81,7 +83,16 @@ def verify(src_path, out_path, before_ins, after_ins, before_check, after_check,
     else:
         for a, b in pairs:
             for k in PARA_STRUCT_KEYS:
-                av = rm.path(a.get(k)) if k == "path" else a.get(k)
+                av = a.get(k)
+                if k == "path":
+                    av = rm.path(av)
+                elif k == "text" and a["index"] in marker_edits:
+                    old_m, new_m = marker_edits[a["index"]]
+                    av = av.replace(old_m, new_m, 1)          # 허용된 번호·기호 문자 교정만
+                elif k == "list_marker" and a["index"] in marker_edits:
+                    continue                                   # 교정된 번호·기호는 다시 감지된다
+                elif k == "controls" and a["index"] in added_controls:
+                    av = list(av or []) + [added_controls[a["index"]]]   # 허용된 쪽 번호 컨트롤 추가만
                 if av != b.get(k):
                     diffs.append("문단 #%d %s" % (a["index"], k))
     checks.append(_check("문단 수·순서·텍스트·개체 동일", not diffs,
@@ -104,6 +115,17 @@ def verify(src_path, out_path, before_ins, after_ins, before_check, after_check,
             d_bad.append("#%d 뒤가 쪽 나눔 대제목 아님" % d["index"])
     checks.append(_check("삭제한 문단은 쪽 나눔 대제목 바로 앞의 빈 문단뿐", not d_bad,
                          "삭제 %d개" % len(deleted) if not d_bad else "; ".join(d_bad)))
+
+    # 3-3) 글자 변경은 항목 번호·기호 문자뿐, 추가한 컨트롤은 쪽 번호뿐
+    m_bad = []
+    for idx, (old_m, new_m) in marker_edits.items():
+        a = by_index.get(idx)
+        if a is None or not (a.get("text") or "").lstrip().startswith(old_m):
+            m_bad.append("#%d 번호·기호 '%s' 아님" % (idx, old_m))
+    c_bad = ["#%s %s" % (i, c) for i, c in added_controls.items() if c != "pageNum"]
+    checks.append(_check("글자 변경은 항목 번호·기호 문자뿐, 추가 요소는 쪽 번호뿐", not (m_bad or c_bad),
+                         "번호·기호 교정 %d개, 쪽 번호 추가 %d개" % (len(marker_edits), len(added_controls)) if not (m_bad or c_bad)
+                         else "; ".join(m_bad + c_bad)))
 
     # 4) 표 구조(행·열·셀 병합·셀 텍스트), 그림 동일
     t_diffs = []
