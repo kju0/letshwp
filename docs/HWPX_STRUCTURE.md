@@ -46,6 +46,11 @@ OWPML(KS X 6101) 요소 의미를 대조한 결과다. 분석 엔진(`src/hwpx_a
   판단: `hp:switch` 는 "이해하는 첫 case 를 쓰고 없으면 default" 규칙이며 한글은 HwpUnitChar 를 지원하므로 case 값이
   화면에 적용되는 값이다. 한글 기본 '본문' 스타일 왼쪽 여백 15pt 가 case 값 1500 과 일치(s1 paraPr 2)하는 것으로 교차 확인.
   → 분석기는 case 를 채택하고 default 원값을 `margin_switch_default_raw` 로 병기한다.
+  **switch 가 없는 문서**(2026-10-31, inbox/sample_original.hwpx — 한글 10 build 5760 저장, paraPr 32개 전부 `hh:margin` 직접 기록):
+  `'  □ '`(14pt, 폭 = 7+7+14+7 = 35pt) 문단의 `hc:intent` 가 `-7000`. 사용자가 "맞는 내어쓰기"라고 확인한 문서(sample_original_wannabe,
+  서식 동일)에서도 같은 값. 따라서 **switch 없는 직접 기록값과 default 분기 값은 1pt = 200**, case(HwpUnitChar) 분기만 1pt = 100 이다.
+  이전 코드는 직접 기록값을 1pt = 100 으로 읽고 써서 내어쓰기·문단 간격이 화면에서 절반으로 나타났다(사용자 보고 "더 들어가야 한다").
+  → 분석기 `margin_scale(source)`: case 100, 그 외 200. Formatter `margin_value()`: case 분기 안이면 ×100, 아니면 ×200.
 - `hh:breakSetting` 줄 나눔 기준: `@breakLatinWord`(영어 단위: KEEP_WORD=단어, HYPHENATION=하이픈, BREAK_WORD=글자),
   `@breakNonLatinWord`(한글 단위). **한글이 저장한 파일은 한글 단위의 값 이름이 동작과 반대다: `BREAK_WORD` = 어절, `KEEP_WORD` = 글자.**
   근거(2026-10-28):

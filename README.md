@@ -189,7 +189,7 @@ python3 src/checker.py   output/test1-output.json -o output/test1_check.json --r
 - 글꼴은 한글 언어 슬롯만, 장평은 한글·영문 슬롯만 비교한다. 글자 크기는 기준 크기(charPr@height)를 비교하고 언어별 상대 크기는 보지 않는다.
 - 혼재 문단은 공백이 아닌 글자를 가진 모든 글자 모양을 검사한다.
 - 문단 간 간격은 본문 최상위 문단만 대상이다(표 셀·머리말·각주·글상자 제외). 제목·캡션·개체 문단이 끼면 다음 ㅇ·-·․ 항목은 판단 불가(□ 는 앞과 무관하게 14pt).
-  '*'·'※' 주석은 층위 판단에서 제외한다. 기존 빈 문단은 삭제하지 않고 `observation` 으로 보고한다.
+  '*'·'※' 주석은 층위 판단에서 제외한다. 바로 앞에 빈 문단이 있으면 빈 줄이 간격 역할을 하므로 문단 위 간격 0pt 가 기준이다. 빈 문단은 삭제하지 않고 `observation` 으로 보고한다.
 - 주석 글자 크기의 기준 '바로 위 문장'은 같은 영역(본문/같은 표 셀) 안의 직전 주석 아닌 문단의 대표 글자 크기다(그 문단이 글자 크기 규칙으로 수정될 예정이면 수정 후 크기).
 - 어절 단위 줄 나눔은 문단 모양 속성(hh:breakSetting)만 바꾼다. 실제 줄 나눔 위치와 양쪽 정렬의 공백 조정은 한글이 문서를 열 때 다시 계산하므로, 저장된 줄 배치 캐시로 '어절 중간에서 잘린 줄 수'를 참고로만 보고한다.
 - 내어쓰기 폭 계산에서 장평은 수정 후 100%, 글자 크기는 글자 크기 규칙의 목표값, 자간은 문서의 실제값을 쓴다.
@@ -219,9 +219,9 @@ python3 src/formatter.py samples/문서.hwpx --out-dir output/문서_fix    # �
 | 글자 크기 | `hh:charPr@height` (pt×100) | 언어별 상대 크기(relSz)는 그대로 |
 | 어절 단위 줄 나눔 | `hh:paraPr/hh:breakSetting@breakNonLatinWord`(한글 단위)·`@breakLatinWord`(영어 단위) | 한글 저장값 기준 어절 = `BREAK_WORD`, 단어 = `KEEP_WORD` |
 | 줄 간격 | `hh:paraPr` 안 모든 `hh:lineSpacing`(switch case·default) | |
-| 문단 위 간격 | `hh:paraPr` 안 `hc:prev` — case 는 pt×100, default 는 그 2배 | 목표값 설정, 누적 없음 |
+| 문단 위 간격 | `hh:paraPr` 안 `hc:prev` — switch 의 case 는 pt×100, default 와 switch 없는 문단 모양은 pt×200 | 목표값 설정, 누적 없음 |
 | 정렬 | `hh:paraPr/hh:align@horizontal` | |
-| 내어쓰기 | `hh:paraPr` 안 `hc:intent` — case 는 pt×100(음수), default 는 그 2배 | 왼쪽 여백은 그대로. 폭은 글자 수 근사 |
+| 내어쓰기 | `hh:paraPr` 안 `hc:intent` — case 는 pt×100(음수), default 와 switch 없는 문단 모양은 pt×200 | 왼쪽 여백은 그대로. 폭은 글꼴 파일의 글자 폭 |
 | 표 양단선 제거 | `hh:borderFill/hh:leftBorder·rightBorder@type` → NONE, 대상 셀 `hp:tc@borderFillIDRef` 재참조 | 정의 복제. 위·아래·안쪽 선은 그대로 |
 | 쪽 여백 | `hp:secPr/hp:pagePr/hp:margin@top,bottom,left,right,header,footer` (mm → HWPUNIT 버림) | |
 | 용지 크기 | `hp:secPr/hp:pagePr@width,height` | op 는 남아 있으나 용지는 판정·수정 대상이 아니라 계획에 포함되지 않음 |
