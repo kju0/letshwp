@@ -364,6 +364,28 @@ class PageBreakFormatTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def _legacy_cfg(self):
+        import checker
+        cfg, _ = checker.load_config()
+        cfg["rules"]["PAGE_BREAK_HEADING"]["spec_mode"] = "분석 후 수정"   # 옛 동작(쪽 나눔 자동 삽입)을 켜서 검사
+        path = self.dir / "legacy_cfg.json"
+        path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+        return str(path)
+
+    def test_keep_with_next_default(self):
+        res = format_hwpx(self.src, self.dir / "kwn")
+        self.assertTrue(res["ok"], res["errors"])
+        ops_applied = [a["op"] for a in res["fix"]["applied"]]
+        self.assertIn("set_para_keep_with_next", ops_applied)
+        self.assertNotIn("set_page_break", ops_applied)
+        self.assertEqual(res["fix"]["deleted_paragraphs"], [])
+        after = inspect_hwpx(str(res["output"]))
+        on = [p["text"][:5] for p in after["paragraphs"] if (p.get("para_format") or {}).get("keep_with_next") == "1"]
+        self.assertEqual(on, ["1. 개요", "2. 계획", "3. 결과", "4. 마무"])   # 제목만(이 픽스처의 빈 문단은 본문 뒤에 있음)
+        self.assertEqual(len(after["paragraphs"]), len(inspect_hwpx(str(self.src))["paragraphs"]))
+        chk = json.loads((self.dir / "kwn" / "check_after.json").read_text(encoding="utf-8"))
+        self.assertEqual({r["status"] for r in chk["results"] if r["rule_id"] == "KEEP_WITH_NEXT"}, {"PASS"})
+
     def test_page_break_and_blank_deletion(self):
         before = inspect_hwpx(str(self.src))
         pages = [(p["text"][:6], (p.get("line_layout") or {}).get("page"), (p.get("line_layout") or {}).get("page_first"),
@@ -371,7 +393,7 @@ class PageBreakFormatTest(unittest.TestCase):
         self.assertEqual(pages[4], ("2. 계획", 1, False, True))      # 1쪽 마지막 줄
         self.assertEqual(pages[7], ("3. 결과", 3, True, False))      # 3쪽 첫 문단
         self.assertEqual(pages[10], ("4. 마무리", 3, False, False))  # 쪽 중간
-        res = format_hwpx(self.src, self.dir / "out")
+        res = format_hwpx(self.src, self.dir / "out", config_path=self._legacy_cfg())
         self.assertTrue(res["ok"], res["errors"])
         self.assertEqual([d["index"] for d in res["fix"]["deleted_paragraphs"]], [6])          # '2.'(쪽 마지막 줄) 앞 빈 문단은 유지
         self.assertEqual(res["fix"]["not_applied"], [])
@@ -388,7 +410,7 @@ class PageBreakFormatTest(unittest.TestCase):
         names = [c["name"] for c in res["verification"]["checks"]]
         self.assertIn("삭제한 문단은 쪽 나눔 대제목 바로 앞의 빈 문단뿐", names)
         # 2회 변환: 더 지울 것도 넣을 것도 없다
-        res2 = format_hwpx(Path(res["output"]), self.dir / "out2")
+        res2 = format_hwpx(Path(res["output"]), self.dir / "out2", config_path=self._legacy_cfg())
         self.assertTrue(res2["ok"], res2["errors"])
         self.assertEqual(res2["fix"]["deleted_paragraphs"], [])
         self.assertEqual([a["op"] for a in res2["fix"]["applied"] if a["op"] in ("set_page_break", "delete_empty_paragraph")], [])

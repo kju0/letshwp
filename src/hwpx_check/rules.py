@@ -1597,15 +1597,28 @@ def rule_time_format(doc):
     return results
 
 
+def _is_top_blank(q):
+    ctx = q["context"]
+    return (q.get("is_empty") and ctx.get("container") == "body" and ctx.get("depth", 0) == 0
+            and not q.get("objects") and not q.get("controls"))
+
+
+def _next_content(doc, p):
+    """문단 뒤의 첫 내용 문단(본문 최상위, 빈 문단은 건너뜀). 없으면 None."""
+    for q in doc.paragraphs[p["index"] + 1:]:
+        ctx = q["context"]
+        if ctx.get("container") != "body" or ctx.get("depth", 0) != 0 or _is_top_blank(q):
+            continue
+        return q
+    return None
+
+
 def _blank_run_before(doc, p):
     """문단 바로 앞에 이어진 빈 문단(본문 최상위, 텍스트·개체·컨트롤 없음)들의 index(앞쪽부터)."""
     out = []
     i = p["index"] - 1
     while i >= 0:
-        q = doc.paragraphs[i]
-        ctx = q["context"]
-        if not (q.get("is_empty") and ctx.get("container") == "body" and ctx.get("depth", 0) == 0
-                and not q.get("objects") and not q.get("controls")):
+        if not _is_top_blank(doc.paragraphs[i]):
             break
         out.append(i)
         i -= 1
@@ -1638,9 +1651,15 @@ def rule_page_break_heading(doc):
                                        unknown_reason=("줄 배치 캐시(hp:linesegarray) 없음" if trusted else "작성 프로그램(%s)이 한글이 아니라 줄 배치 캐시를 신뢰하지 않음" % app),
                                        needed_info="한글에서 저장한 파일(줄 배치 캐시) 또는 쪽 위치 확인"))
             continue
+        # 대제목과 뒤 첫 내용 문단(빈 문단 제외)이 다른 쪽이면 제목만 앞 쪽에 남은 것(2026-10-31 사용자 결정: 사이에 빈 문단만 있어도 같음)
+        nxt = _next_content(doc, p)
+        nxt_page = ((nxt or {}).get("line_layout") or {}).get("page")
+        split = nxt_page is not None and nxt_page > ll["page"]
         where = ("이미 쪽 맨 위(%d쪽 첫 문단) - 자리 고정" % ll["page"] if ll.get("page_first")
-                 else "쪽 마지막(뒤 문단이 다음 쪽) - %d쪽" % ll["page"] if ll.get("page_last") else None)
-        if ll.get("page_last") is None and not ll.get("page_first"):
+                 else "쪽 마지막(뒤 문단이 다음 쪽) - %d쪽" % ll["page"] if ll.get("page_last")
+                 else "%d쪽에 있고 뒤 내용(#%d)은 %d쪽 - 사이에 빈 문단만 있음" % (ll["page"], nxt["index"], nxt_page) if split
+                 else None)
+        if ll.get("page_last") is None and not ll.get("page_first") and not split:
             results.append(make_result(doc, "PAGE_BREAK_HEADING", UNKNOWN, "뒤 문단의 쪽 위치를 알 수 없음", target_of(p), role_of(p),
                                        current, expected, unknown_reason="마지막 최상위 문단이라 다음 문단과 비교할 수 없음",
                                        needed_info="쪽 위치 확인"))
@@ -1648,6 +1667,13 @@ def rule_page_break_heading(doc):
         if where is None:
             results.append(make_result(doc, "PAGE_BREAK_HEADING", PASS, "쪽 중간(%d쪽)에 있고 뒤 내용이 같은 쪽에 이어짐" % ll["page"],
                                        target_of(p), role_of(p), current, {"value": False, "display": "쪽 나눔 불필요", "basis": rc["spec_text"]}))
+            continue
+        if rc.get("spec_mode") == "분석만":
+            results.append(make_result(doc, "PAGE_BREAK_HEADING", UNKNOWN, "대제목이 %s (수정 전 줄 배치 기준) - 자동 쪽 나눔은 끔" % where,
+                                       target_of(p), role_of(p), current, expected,
+                                       observation="쪽 위치는 수정 전 줄 배치 캐시 기준이라 서식을 고친 뒤에는 달라질 수 있음. '다음 문단과 함께' 규칙이 제목을 다음 문단과 묶는다",
+                                       unknown_reason="2026-10-31 사용자 결정: 쪽 나눔 자동 삽입 대신 '다음 문단과 함께'로 처리",
+                                       needed_info="한글에서 열어 쪽 배치 확인"))
             continue
         si = p.get("section", 0)
         actions = [{"op": "set_page_break", "paragraph_index": p["index"], "from": False, "to": True,
@@ -1665,6 +1691,50 @@ def rule_page_break_heading(doc):
             where, " (바로 앞 빈 문단 %d개 삭제)" % len(blanks) if blanks else ""),
             target_of(p), role_of(p), current, expected, fix_actions=actions,
             observation="쪽 위치는 수정 전 줄 배치 캐시 기준", extra={"blank_paragraphs_to_delete": blanks}))
+    return results
+
+
+def rule_keep_with_next(doc):
+    """제목 다음 문단과 함께(2026-10-31 사용자 결정): 번호 제목(1. 가. 1))과 그 뒤에 이어지는 빈 문단에 keepWithNext 를 켠다.
+    쪽 위치를 계산하지 않고 한글이 쪽을 나눌 때 제목을 다음 문단과 떨어뜨리지 않게 한다."""
+    rc = doc.rule_cfg("KEEP_WITH_NEXT")
+    levels = set(rc.get("levels") or [1, 2, 3])
+    targets = {}   # index -> 사유
+    for p in doc.paragraphs:
+        h = p.get("hierarchy") or {}
+        if h.get("kind") != "item" or h.get("level") not in levels:
+            continue
+        targets[p["index"]] = "%d단계 번호 제목 '%s'" % (h["level"], h.get("marker"))
+        j = p["index"] + 1
+        while j < len(doc.paragraphs):
+            q = doc.paragraphs[j]
+            ctx = q["context"]
+            if not (q.get("is_empty") and ctx.get("container") == "body" and ctx.get("depth", 0) == 0 and not q.get("objects")):
+                break
+            targets[j] = "제목 #%d 뒤의 빈 문단(첫 내용 문단까지 묶음)" % p["index"]
+            j += 1
+    results = []
+    for i, why in targets.items():
+        p = doc.paragraphs[i]
+        pf = p.get("para_format") or {}
+        cur = pf.get("keep_with_next")
+        expected = {"value": "1", "display": "다음 문단과 함께 켬", "basis": rc["spec_text"]}
+        if cur is None:
+            results.append(make_result(doc, "KEEP_WITH_NEXT", UNKNOWN, "줄 나눔 설정(hh:breakSetting)을 읽지 못함", target_of(p), role_of(p),
+                                       expected=expected, unknown_reason="paraPr breakSetting 없음", needed_info="문단 모양 정의"))
+            continue
+        on = str(cur) == "1"
+        current = {"value": cur, "display": "다음 문단과 함께 %s" % ("켬" if on else "끔"),
+                   "source": VALUE_SOURCE + " - paraPr/breakSetting@keepWithNext", "refs": {"para_pr_id": pf.get("para_pr_id")},
+                   "role_label": p["role"]["label"]}
+        if on:
+            results.append(make_result(doc, "KEEP_WITH_NEXT", PASS, "'다음 문단과 함께'가 켜져 있음 (%s)" % why, target_of(p), role_of(p), current, expected))
+        else:
+            results.append(make_result(doc, "KEEP_WITH_NEXT", FAIL, "'다음 문단과 함께'가 꺼져 있음 (%s)" % why, target_of(p), role_of(p), current, expected,
+                                       fix_actions=[{"op": "set_para_keep_with_next", "para_pr_id": pf.get("para_pr_id"),
+                                                     "xml": "Contents/header.xml hh:paraPr[@id=%s]//hh:breakSetting@keepWithNext" % pf.get("para_pr_id"),
+                                                     "from": cur, "to": "1",
+                                                     "note": "문단 모양을 복제해 대상 문단만 켠다. 화면 변화는 제목이 쪽 끝에 걸릴 때만(한글이 다음 쪽으로 넘김)"}]))
     return results
 
 
@@ -1759,6 +1829,7 @@ RULES = [
     ("PARA_ALIGN", rule_para_align),
     ("PARA_SPACING", rule_para_spacing),
     ("PAGE_BREAK_HEADING", rule_page_break_heading),
+    ("KEEP_WITH_NEXT", rule_keep_with_next),
     ("ITEM_NUMBER", rule_item_number),
     ("ITEM_BULLET", rule_item_bullet),
     ("HANGING_INDENT", rule_hanging_indent),

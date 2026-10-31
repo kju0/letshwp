@@ -57,7 +57,7 @@ def P(text, space_before=0.0, role=None, indent=0.0, lines=1, page_break=False, 
         "objects": objects or [],
         "page_break_before": page_break,
         "para_format": {"para_pr_id": para_pr_id, "space_before_pt": space_before, "space_after_pt": space_after,
-                        "indent_pt": indent, "left_margin_pt": 0.0, "align": "JUSTIFY",
+                        "indent_pt": indent, "left_margin_pt": 0.0, "align": "JUSTIFY", "keep_with_next": "0",
                         "line_spacing_type": "PERCENT", "line_spacing_value": 160, "line_spacing": "160%"},
         "char_format": {"char_pr_id": _cid(size), "font_hangul": font, "size_pt": size},
         "runs": [{"char_pr_id": _cid(size), "chars": len(text)}],
@@ -607,8 +607,44 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def page_break(paragraphs, **kw):
-    return rule_results(paragraphs, "PAGE_BREAK_HEADING", **kw)
+def page_break(paragraphs, config=None, **kw):
+    # 쪽 나눔 자동 삽입은 기본적으로 꺼져 있다(2026-10-31). 이 도우미는 옛 동작(분석 후 수정)을 켜서 검사한다
+    cfg = copy.deepcopy(config or CONFIG)
+    cfg["rules"]["PAGE_BREAK_HEADING"]["spec_mode"] = "분석 후 수정"
+    return rule_results(paragraphs, "PAGE_BREAK_HEADING", config=cfg, **kw)
+
+
+def keep_with_next(paragraphs, **kw):
+    return rule_results(paragraphs, "KEEP_WITH_NEXT", **kw)
+
+
+class KeepWithNextTest(unittest.TestCase):
+    def test_headings_and_following_blanks(self):
+        paras = [P("1. 대제목"), P(""), P(" 가. 중제목"), P(""), P(""), P("  1) 소제목"), P("본문"), P(""), P("□ 항목"), P("ㅇ 세부"),
+                 P("   가) 넷째 단계"), P("본문2")]
+        by_idx, res = keep_with_next(paras)
+        self.assertEqual(sorted(by_idx), [0, 1, 2, 3, 4, 5])               # 제목 3개 + 뒤따르는 빈 문단 3개. 본문·기호·가) 는 대상 아님
+        for i in by_idx:
+            r = by_idx[i]
+            self.assertEqual(r["status"], "FAIL", i)
+            a = r["fix"]["actions"][0]
+            self.assertEqual((a["op"], a["to"]), ("set_para_keep_with_next", "1"))
+        self.assertIn("빈 문단", by_idx[1]["reason"])
+        self.assertTrue(any(x["op"] == "set_para_keep_with_next" for x in res["fix_plan"]["role_based_actions"]))
+
+    def test_already_on_passes(self):
+        paras = [P("1. 대제목"), P("본문")]
+        paras[0]["para_format"]["keep_with_next"] = "1"
+        by_idx, _ = keep_with_next(paras)
+        self.assertEqual(by_idx[0]["status"], "PASS")
+
+    def test_page_break_rule_default_reports_only(self):
+        paras = [P("1. 첫", layout=MID), P(""), P("2. 쪽 끝 대제목", layout=LAST), P("본문", layout=FIRST)]
+        by_idx, res = rule_results(paras, "PAGE_BREAK_HEADING")
+        self.assertEqual(by_idx[2]["status"], "UNKNOWN")
+        self.assertIn("자동 쪽 나눔은 끔", by_idx[2]["reason"])
+        self.assertFalse(any(a["op"] in ("set_page_break", "delete_empty_paragraph")
+                             for a in res["fix_plan"]["auto_actions"] + res["fix_plan"]["role_based_actions"]))
 
 
 LAST = {"page": 1, "page_first": False, "page_last": True}
@@ -633,6 +669,18 @@ class PageBreakHeadingTest(unittest.TestCase):
         plan = res["fix_plan"]["role_based_actions"]
         self.assertEqual(sorted(a["paragraphs"][0] for a in plan if a["op"] == "set_page_break"), [3, 6])
         self.assertEqual(sorted(a["paragraphs"][0] for a in plan if a["op"] == "delete_empty_paragraph"), [5])
+
+    def test_heading_split_from_content_by_blank(self):
+        # 대제목은 1쪽 중간이지만 뒤 빈 문단이 1쪽 마지막이고 내용은 2쪽 → 쪽 나눔(사이 빈 문단은 그대로)
+        paras = [P("1. 첫", layout=MID), P("본문", layout=MID), P(""), P("2. 제목만 남음", layout={"page": 1, "page_first": False, "page_last": False}),
+                 P("", layout=LAST), P("가. 다음 쪽 내용", layout=FIRST), P(""), P("3. 쪽 중간", layout=MID), P("", layout=MID),
+                 P("가. 같은 쪽 내용", layout=MID)]
+        by_idx, _ = page_break(paras)
+        r = by_idx[3]
+        self.assertEqual(r["status"], "FAIL", r["reason"])
+        self.assertIn("뒤 내용(#5)은 2쪽", r["reason"])
+        self.assertEqual([a["op"] for a in r["fix"]["actions"]], ["set_page_break"])     # 앞 빈 문단은 남김
+        self.assertEqual(by_idx[7]["status"], "PASS")                                   # 내용이 같은 쪽이면 그대로
 
     def test_blank_before_page_last_heading_deleted_when_option_off(self):
         cfg = copy.deepcopy(CONFIG)

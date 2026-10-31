@@ -125,6 +125,12 @@ def op_set_cell_border(data, root, a):
     return edits
 
 
+def op_set_para_keep_with_next(data, root, a):
+    # hh:breakSetting@keepWithNext (switch 안에 있으면 모든 분기) = "1"/"0"
+    to = "1" if a.get("to", True) in (True, 1, "1") else "0"
+    return [set_attr_edit(data, el, "keepWithNext", to) for el in _only(list(root.iter("breakSetting")), "hh:breakSetting")]
+
+
 DEF_OPS = {
     "set_char_spacing": ("charPr", op_set_char_spacing),
     "set_char_ratio": ("charPr", op_set_char_ratio),
@@ -134,6 +140,7 @@ DEF_OPS = {
     "set_para_line_spacing": ("paraPr", op_set_para_line_spacing),
     "set_para_space_before": ("paraPr", op_set_para_space_before),
     "set_para_hanging_indent": ("paraPr", op_set_para_hanging_indent),
+    "set_para_keep_with_next": ("paraPr", op_set_para_keep_with_next),
     "set_para_word_break": ("paraPr", op_set_para_word_break),
     "set_cell_border": ("borderFill", op_set_cell_border),
 }
