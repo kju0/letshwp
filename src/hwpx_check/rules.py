@@ -817,7 +817,10 @@ def rule_para_spacing(doc):
 
         expected_pt, basis, allowed = None, None, ()
         blanks = h.get("blank_paragraphs_before") or 0
-        if blanks and kind in ("item", "bullet", "note", "body") and not (special and special["paragraph"] == p["index"]):
+        if kind == "item" and h.get("level") == 1 and p.get("page_break_before"):
+            # 쪽 나눔 바로 뒤의 대제목은 새 쪽 첫 줄이므로 문단 위 간격 0pt (2026-10-31 사용자 결정)
+            expected_pt, basis = 0, "쪽 나눔 바로 뒤의 대제목 → 문단 위 간격 0pt"
+        elif blanks and kind in ("item", "bullet", "note", "body") and not (special and special["paragraph"] == p["index"]):
             # 빈 문단(빈 줄)으로 간격을 둔 문단: 빈 줄이 간격 역할을 하므로 문단 위 간격은 0pt (sample_original 기준, 2026-10-31)
             expected_pt = 0
             basis = "앞에 빈 문단 %d개가 간격 역할 → 문단 위 간격 0pt (빈 문단은 삭제하지 않음)" % blanks
@@ -1448,6 +1451,74 @@ def rule_time_format(doc):
     return results
 
 
+def _blank_run_before(doc, p):
+    """문단 바로 앞에 이어진 빈 문단(본문 최상위, 텍스트·개체·컨트롤 없음)들의 index(앞쪽부터)."""
+    out = []
+    i = p["index"] - 1
+    while i >= 0:
+        q = doc.paragraphs[i]
+        ctx = q["context"]
+        if not (q.get("is_empty") and ctx.get("container") == "body" and ctx.get("depth", 0) == 0
+                and not q.get("objects") and not q.get("controls")):
+            break
+        out.append(i)
+        i -= 1
+    return list(reversed(out))
+
+
+def rule_page_break_heading(doc):
+    """대제목 쪽 나눔(2026-10-31 사용자 결정, A 규칙): 쪽 마지막 줄이거나 뒤 문단이 다음 쪽이면, 또는 이미 쪽 맨 위면 쪽 나눔.
+    쪽 위치는 한글이 저장한 줄 배치 캐시로 판단한다. 첫 대제목은 제외."""
+    rc = doc.rule_cfg("PAGE_BREAK_HEADING")
+    trusted, app = _layout_trusted(doc)
+    heads = [p for p in doc.paragraphs if (p.get("hierarchy") or {}).get("kind") == "item" and p["hierarchy"].get("level") == 1]
+    results = []
+    for n, p in enumerate(heads):
+        has = bool(p.get("page_break_before"))
+        current = {"value": has, "display": "쪽 나눔 %s" % ("있음" if has else "없음"), "source": VALUE_SOURCE + " - hp:p@pageBreak"}
+        expected = {"value": True, "display": "새 쪽에서 시작(쪽 나눔)", "basis": rc["spec_text"]}
+        ll = p.get("line_layout") or {}
+        if n == 0:
+            results.append(make_result(doc, "PAGE_BREAK_HEADING", SKIP, "문서의 첫 대제목은 쪽 나눔 대상이 아님",
+                                       target_of(p), role_of(p), unknown_reason="첫 대제목 제외(규칙)"))
+            continue
+        if has:
+            results.append(make_result(doc, "PAGE_BREAK_HEADING", PASS, "쪽 나눔이 있어 새 쪽에서 시작", target_of(p), role_of(p),
+                                       current, expected))
+            continue
+        if not trusted or ll.get("page") is None:
+            results.append(make_result(doc, "PAGE_BREAK_HEADING", UNKNOWN, "쪽 위치를 판단할 줄 배치 정보가 없음", target_of(p), role_of(p),
+                                       current, expected,
+                                       unknown_reason=("줄 배치 캐시(hp:linesegarray) 없음" if trusted else "작성 프로그램(%s)이 한글이 아니라 줄 배치 캐시를 신뢰하지 않음" % app),
+                                       needed_info="한글에서 저장한 파일(줄 배치 캐시) 또는 쪽 위치 확인"))
+            continue
+        where = ("이미 쪽 맨 위(%d쪽 첫 문단) - 자리 고정" % ll["page"] if ll.get("page_first")
+                 else "쪽 마지막(뒤 문단이 다음 쪽) - %d쪽" % ll["page"] if ll.get("page_last") else None)
+        if ll.get("page_last") is None and not ll.get("page_first"):
+            results.append(make_result(doc, "PAGE_BREAK_HEADING", UNKNOWN, "뒤 문단의 쪽 위치를 알 수 없음", target_of(p), role_of(p),
+                                       current, expected, unknown_reason="마지막 최상위 문단이라 다음 문단과 비교할 수 없음",
+                                       needed_info="쪽 위치 확인"))
+            continue
+        if where is None:
+            results.append(make_result(doc, "PAGE_BREAK_HEADING", PASS, "쪽 중간(%d쪽)에 있고 뒤 내용이 같은 쪽에 이어짐" % ll["page"],
+                                       target_of(p), role_of(p), current, {"value": False, "display": "쪽 나눔 불필요", "basis": rc["spec_text"]}))
+            continue
+        si = p.get("section", 0)
+        actions = [{"op": "set_page_break", "paragraph_index": p["index"], "from": False, "to": True,
+                    "xml": "Contents/section%d.xml hp:p@pageBreak (%s)" % (si, p["path"]),
+                    "note": "문단 속성만 바꿈. 줄 배치는 한글이 열 때 다시 계산"}]
+        blanks = _blank_run_before(doc, p) if rc.get("delete_blank_before") else []
+        for j in blanks:
+            actions.append({"op": "delete_empty_paragraph", "paragraph_index": j, "from": "빈 문단", "to": "삭제",
+                            "xml": "Contents/section%d.xml hp:p 삭제 (%s)" % (si, doc.paragraphs[j]["path"]),
+                            "note": "절대 원칙 예외: 쪽 나눔 대제목 바로 앞의 빈 문단(텍스트·개체·컨트롤 없음)만 삭제"})
+        results.append(make_result(doc, "PAGE_BREAK_HEADING", FAIL, "대제목이 %s → 쪽 나눔 필요%s" % (
+            where, " (바로 앞 빈 문단 %d개 삭제)" % len(blanks) if blanks else ""),
+            target_of(p), role_of(p), current, expected, fix_actions=actions,
+            observation="쪽 위치는 수정 전 줄 배치 캐시 기준", extra={"blank_paragraphs_to_delete": blanks}))
+    return results
+
+
 # ----------------------------------------------------------------------------
 # 표 단위 규칙
 # ----------------------------------------------------------------------------
@@ -1537,6 +1608,7 @@ RULES = [
     ("LINE_SPACING", rule_line_spacing),
     ("PARA_ALIGN", rule_para_align),
     ("PARA_SPACING", rule_para_spacing),
+    ("PAGE_BREAK_HEADING", rule_page_break_heading),
     ("ITEM_NUMBER", rule_item_number),
     ("ITEM_BULLET", rule_item_bullet),
     ("HANGING_INDENT", rule_hanging_indent),

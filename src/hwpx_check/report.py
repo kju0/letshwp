@@ -15,6 +15,7 @@ OP_LABEL = {
     "set_para_line_spacing": "줄 간격 변경", "set_para_space_before": "문단 위 간격 설정",
     "set_para_hanging_indent": "내어쓰기 설정", "set_para_align": "정렬 변경", "set_page_size": "용지 크기 변경",
     "set_char_size": "글자 크기 변경", "set_page_margin": "쪽 여백 변경", "set_cell_border": "표 양단선 제거",
+    "set_page_break": "대제목 쪽 나눔 설정", "delete_empty_paragraph": "빈 문단 삭제(쪽 나눔 대제목 앞)",
     "set_para_word_break": "줄 나눔 기준 변경(어절 단위)",
 }
 
@@ -191,7 +192,8 @@ def render_report(res):
         for a in acts:
             ref = ("charPr %s" % a["char_pr_id"]) if "char_pr_id" in a else \
                   ("paraPr %s" % a["para_pr_id"]) if "para_pr_id" in a else \
-                  ("borderFill %s" % a["border_fill_id"]) if "border_fill_id" in a else ("구역 %s" % a.get("section_index"))
+                  ("borderFill %s" % a["border_fill_id"]) if "border_fill_id" in a else \
+                  ("문단 #%s" % a["paragraph_index"]) if "paragraph_index" in a else ("구역 %s" % a.get("section_index"))
             w("   - %s | %s | %s → %s | %s%s" % (
                 OP_LABEL.get(a["op"], a["op"]), ref, _short(a.get("from", a.get("from_mm"))), _short(a.get("to", a.get("to_mm"))),
                 "대상 셀 %d개" % len(a["cells"]) if a.get("cells") else "대상 문단 %d개" % len(a["paragraphs"]),

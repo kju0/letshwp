@@ -29,12 +29,12 @@ PRESERVATION_RULES = [
     "원본 HWPX 는 수정하지 않고 복제본에만 적용한다.",
     "문단 텍스트와 숫자는 변경하지 않는다(날짜·시간·번호·기호는 자동 수정 대상에서 제외).",
     "문단 순서, 표 구조(행·열·셀 병합), 그림 등 논리 구조를 변경하지 않는다.",
-    "아래 actions 에 나열된 서식 속성(header.xml 의 charPr/paraPr/borderFill, section 의 pagePr 크기·여백)만 변경한다.",
+    "아래 actions 에 나열된 서식 속성(header.xml 의 charPr/paraPr/borderFill, section 의 pagePr 여백, 대제목 문단의 pageBreak)만 변경한다.",
     "공유되는 charPr/paraPr/borderFill 을 바꿀 때는 정의를 복제해 대상 문단·셀만 다시 참조시킨다(다른 문단·셀은 그대로).",
     "자간은 수정하지 않는다. 어절 단위 줄 나눔은 문단 모양의 줄 나눔 기준(한글 단위 어절·영어 단위 단어)으로 설정하고, 줄 배치는 한글이 열 때 다시 계산한다.",
     "장평은 100% 로 유지한다. 용지 크기는 판정·수정하지 않는다.",
     "간격·서식은 목표값으로 설정하고 기존값에 더하지 않는다(같은 문서를 반복 변환해도 누적되지 않음).",
-    "빈 문단은 중복 간격을 만들더라도 삭제하지 않고 보고만 한다.",
+    "빈 문단은 삭제하지 않는다. 유일한 예외: 쪽 나눔을 넣는 대제목 바로 앞에 이어진 빈 문단(텍스트·개체·컨트롤 없음)만 지운다(2026-10-31 사용자 결정, 검증 단계에서 이 경우만 허용).",
     "수정 후 Inspector 를 다시 실행해 문단 수·표 수·텍스트·표 격자 검증이 원본과 동일한지 확인하고, 실패하면 결과를 폐기한다.",
 ]
 
@@ -169,7 +169,8 @@ def build_fix_plan(doc, results):
         for a in r["fix"]["actions"]:
             ref = ("char_pr_id", a["char_pr_id"]) if "char_pr_id" in a else \
                   ("para_pr_id", a["para_pr_id"]) if "para_pr_id" in a else \
-                  ("border_fill_id", a["border_fill_id"]) if "border_fill_id" in a else ("section_index", a.get("section_index"))
+                  ("border_fill_id", a["border_fill_id"]) if "border_fill_id" in a else \
+                  ("paragraph_index", a["paragraph_index"]) if "paragraph_index" in a else ("section_index", a.get("section_index"))
             key = (a["op"], ref, json.dumps(a.get("to", a.get("to_mm")), ensure_ascii=False, sort_keys=True),
                    json.dumps(a.get("langs") or a.get("lang") or a.get("sides")))
             g = grouped.get(key)
@@ -182,6 +183,10 @@ def build_fix_plan(doc, results):
             if a.get("cells"):
                 # 표 셀 대상 동작(테두리): 문단이 아니라 셀 목록으로 적용 대상을 지정한다
                 g.setdefault("cells", []).extend(a["cells"])
+            elif "paragraph_index" in a:
+                # 문단 자체 동작(쪽 나눔·빈 문단 삭제): 동작이 가리키는 문단
+                if a["paragraph_index"] not in g["paragraphs"]:
+                    g["paragraphs"].append(a["paragraph_index"])
             elif r["target"].get("paragraph_index") is not None:
                 g["paragraphs"].append(r["target"]["paragraph_index"])
     actions = []

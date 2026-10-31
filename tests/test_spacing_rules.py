@@ -34,7 +34,8 @@ def _cid(size):
 
 
 def P(text, space_before=0.0, role=None, indent=0.0, lines=1, page_break=False, objects=None,
-      container="body", space_after=0.0, auto_numbering=None, para_pr_id=None, size=14.0, confidence=0.9, font="휴먼명조"):
+      container="body", space_after=0.0, auto_numbering=None, para_pr_id=None, size=14.0, confidence=0.9, font="휴먼명조",
+      layout=None):
     """간이 문단. role 을 생략하면 비어 있지 않은 문단은 본문으로 둔다."""
     empty = not text.strip()
     role = role or ("object_anchor" if empty and objects else "empty" if empty else "body")
@@ -53,8 +54,8 @@ def P(text, space_before=0.0, role=None, indent=0.0, lines=1, page_break=False, 
                         "line_spacing_type": "PERCENT", "line_spacing_value": 160, "line_spacing": "160%"},
         "char_format": {"char_pr_id": _cid(size), "font_hangul": font, "size_pt": size},
         "runs": [{"char_pr_id": _cid(size), "chars": len(text)}],
-        "line_layout": {"line_count": lines, "lines": [{"textpos": 0, "horzpos_pt": 0.0, "horzsize_pt": 480.0}] * lines,
-                        "source": "test"},
+        "line_layout": dict({"line_count": lines, "lines": [{"textpos": 0, "horzpos_pt": 0.0, "horzsize_pt": 480.0}] * lines,
+                             "source": "test"}, **(layout or {})),
     }
 
 
@@ -527,3 +528,54 @@ class WordBreakTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def page_break(paragraphs, **kw):
+    return rule_results(paragraphs, "PAGE_BREAK_HEADING", **kw)
+
+
+LAST = {"page": 1, "page_first": False, "page_last": True}
+FIRST = {"page": 2, "page_first": True, "page_last": False}
+MID = {"page": 2, "page_first": False, "page_last": False}
+
+
+class PageBreakHeadingTest(unittest.TestCase):
+    def test_rule_a(self):
+        paras = [P("1. 첫 대제목", layout=MID), P("본문", layout=MID), P(""), P("2. 쪽 마지막 줄 대제목", layout=LAST),
+                 P("본문", layout=FIRST), P(""), P("3. 이미 쪽 맨 위 대제목", layout=FIRST), P("본문", layout=MID), P(""),
+                 P("4. 쪽 중간 대제목", layout=MID), P("본문", layout=MID)]
+        by_idx, res = page_break(paras)
+        self.assertEqual(by_idx[0]["status"], "SKIP")                                  # 첫 대제목 제외
+        for i, blank in ((3, 2), (6, 5)):
+            r = by_idx[i]
+            self.assertEqual(r["status"], "FAIL", r["reason"])
+            ops = [(a["op"], a["paragraph_index"]) for a in r["fix"]["actions"]]
+            self.assertEqual(ops, [("set_page_break", i), ("delete_empty_paragraph", blank)])
+            self.assertEqual(r["blank_paragraphs_to_delete"], [blank])
+        self.assertEqual(by_idx[9]["status"], "PASS")                                  # 쪽 중간은 그대로
+        plan = res["fix_plan"]["role_based_actions"]
+        self.assertEqual(sorted(a["paragraphs"][0] for a in plan if a["op"] == "set_page_break"), [3, 6])
+        self.assertEqual(sorted(a["paragraphs"][0] for a in plan if a["op"] == "delete_empty_paragraph"), [2, 5])
+
+    def test_existing_page_break_passes_and_spacing_zero(self):
+        paras = [P("1. 첫"), P("본문"), P("2. 새 쪽 대제목", 0, page_break=True, layout=FIRST), P("본문")]
+        by_idx, res = page_break(paras)
+        self.assertEqual(by_idx[2]["status"], "PASS")
+        sp = {r["target"]["paragraph_index"]: r for r in res["results"]
+              if r["rule_id"] == "PARA_SPACING" and r["target"].get("type") == "paragraph"}
+        self.assertEqual((sp[2]["status"], sp[2]["expected"]["value"]), ("PASS", 0))
+        self.assertIn("쪽 나눔", sp[2]["expected"]["basis"])
+        sp2, _ = spacing([P("1. 첫"), P("2. 새 쪽", 20, page_break=True, layout=FIRST)])
+        self.assertEqual((sp2[1]["status"], sp2[1]["fix"]["actions"][0]["to"]), ("FAIL", 0))
+
+    def test_no_layout_or_untrusted_is_unknown(self):
+        by_idx, _ = page_break([P("1. 첫"), P("2. 둘")])
+        self.assertEqual(by_idx[1]["status"], "UNKNOWN")
+        by_idx, _ = page_break([P("1. 첫", layout=MID), P("2. 둘", layout=LAST)], app="Other Writer")
+        self.assertEqual(by_idx[1]["status"], "UNKNOWN")
+        self.assertIn("한글이 아니라", by_idx[1]["unknown_reason"])
+
+    def test_blank_with_object_is_not_deleted(self):
+        paras = [P("1. 첫", layout=MID), P("", objects=["T0"]), P("2. 둘", layout=LAST), P("본문", layout=FIRST)]
+        by_idx, _ = page_break(paras)
+        self.assertEqual([a["op"] for a in by_idx[2]["fix"]["actions"]], ["set_page_break"])

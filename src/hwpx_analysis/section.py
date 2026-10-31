@@ -98,8 +98,10 @@ class SectionWalker:
         self._cur_sec = sec_info
         ctx = {"container": "body", "path": "sec%d" % self.sec, "depth": 0,
                "table_id": None, "cell": None, "object_id": None}
+        first_index = len(self.st["paragraphs"])
         for i, p in enumerate(children(root, "p")):
             self.visit_paragraph(p, dict(ctx, path="%s/p%d" % (ctx["path"], i)))
+        self.annotate_pages(first_index)
         for c in root:
             if ln(c.tag) != "p":
                 self.st["unknown"]["sec/" + ln(c.tag)] += 1
@@ -213,10 +215,34 @@ class SectionWalker:
         if arr is None:
             return None
         lines = [{"textpos": to_int(ls.get("textpos")),
+                  "vertpos": to_int(ls.get("vertpos")),
                   "horzpos_pt": to_pt(to_int(ls.get("horzpos"))),
                   "horzsize_pt": to_pt(to_int(ls.get("horzsize")))}
                  for ls in children(arr, "lineseg")]
         return {"line_count": len(lines), "lines": lines[:50], "source": "hp:linesegarray (레이아웃 캐시)"}
+
+    def annotate_pages(self, first_index):
+        """본문 최상위 문단의 줄 배치 캐시(vertpos)로 쪽 위치를 추정한다.
+        vertpos 는 쪽 안의 세로 위치라 앞 문단보다 작아지면 새 쪽이 시작된 것이다(한글 저장 파일 관찰: 새 쪽 첫 문단은 vertpos 0).
+        기록: page(1부터), page_first(쪽 첫 문단), page_last(다음 최상위 문단이 다른 쪽). 마지막 문단의 page_last 는 알 수 없어 None."""
+        tops = [p for p in self.st["paragraphs"][first_index:]
+                if p["context"]["container"] == "body" and p["context"]["depth"] == 0 and p.get("line_layout")]
+        page, last_v = 1, None
+        prev = None
+        for p in tops:
+            lines = p["line_layout"]["lines"]
+            v = lines[0].get("vertpos") if lines else None
+            if v is None:
+                continue
+            first = last_v is None or v < last_v or v == 0
+            if last_v is not None and v < last_v:
+                page += 1
+            p["line_layout"].update({"page": page, "page_first": first, "page_last": None,
+                                     "page_source": "hp:linesegarray vertpos (레이아웃 캐시 - 수정 전 배치)"})
+            if prev is not None:
+                prev["line_layout"]["page_last"] = first
+            prev = p
+            last_v = lines[-1].get("vertpos") if lines[-1].get("vertpos") is not None else v
 
     def _distinct_char_formats(self, cp_ids):
         """서로 다른 charPr id 라도 분석 대상 속성(글꼴/크기/장평/자간/굵게/기울임)이 같으면 하나로 본다."""
