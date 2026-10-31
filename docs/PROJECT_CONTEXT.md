@@ -175,6 +175,9 @@ Claude Code 는 세션을 시작할 때 이 문서를 먼저 읽는다. 개발 �
    - PAGE_BREAK_HEADING 은 '분석만'(UNKNOWN 보고)으로 전환, 빈 문단 삭제도 함께 꺼짐. 코드·검증 예외는 남겨 두어 설정으로 다시 켤 수 있음(테스트는 설정을 켜서 옛 동작 검사).
    - 한글에서 keepWithNext 가 기대대로 제목을 다음 쪽으로 넘기는지는 사용자 확인 필요(쪽 맨 위에 빈 줄이 남는 경우는 보고만).
 
+17. **제목 박스 보호**(2026-10-31, 사용자 결정): 문서 제목 박스 안 문단은 글자 크기(22pt 규칙 포함) 등 어떤 서식도 바꾸지 않는다(Doc.protected_paragraphs, make_result 에서 FAIL→UNKNOWN).
+   이유: 15mm 고정 칸에서 20→22pt 로 키우자 제목 위아래 여백이 줄었다(sample_puzzle1 수정본 3). 쪽 번호 컨트롤은 wannabe 와 같은 위치(표 run 맨 앞)로 옮김.
+
 ## 4. 핵심 기술 판단 (근거: docs/HWPX_STRUCTURE.md)
 - charPr/paraPr ID 하나가 완전한 속성 집합이다. 스타일 상속을 계산할 필요가 없다.
 - `hp:switch` 는 이해하는 첫 case(2016/HwpUnitChar, 2016/paragraph 네임스페이스)를 쓰고, 없으면 default 를 쓴다. default 의 여백 값은 case 값의 2배로 저장된다.
