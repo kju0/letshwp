@@ -102,6 +102,17 @@ class OpsTest(unittest.TestCase):
         landscape = _apply(ops.op_set_page_size, b'<hp:pagePr width="79200" height="61200"/>', a)
         self.assertEqual(landscape, b'<hp:pagePr width="84188" height="59528"/>')
 
+    def test_margin_value_scale_by_branch(self):
+        # case(HwpUnitChar) 분기 pt×100, default 분기·switch 없는(direct) 문단 모양 pt×200
+        out = _apply(ops.op_set_para_hanging_indent, PARA_PR, {"to": -35})
+        self.assertIn(b'<hc:intent value="-3500" unit="HWPUNIT"/><hc:prev value="100"', out)      # case
+        self.assertIn(b'<hc:intent value="-7000" unit="HWPUNIT"/><hc:prev value="200"', out)      # default
+        direct = (b'<hh:paraPr id="7"><hh:margin><hc:intent value="0" unit="HWPUNIT"/><hc:prev value="0" unit="HWPUNIT"/></hh:margin>'
+                  b'<hh:lineSpacing type="PERCENT" value="160" unit="HWPUNIT"/></hh:paraPr>')
+        out = _apply(ops.op_set_para_hanging_indent, direct, {"to": -35})
+        out = _apply(ops.op_set_para_space_before, out, {"to": 14})
+        self.assertIn(b'<hc:intent value="-7000" unit="HWPUNIT"/><hc:prev value="2800" unit="HWPUNIT"/>', out)
+
     def test_page_margin(self):
         data = b'<hp:pagePr width="59528" height="84188"><hp:margin header="4000" footer="2834" left="5669" right="5669" top="4000" bottom="4251"/></hp:pagePr>'
         out = _apply(ops.op_set_page_margin, data, {"to_mm": {"top": 20.0, "bottom": 10.0, "header": 10.0}})
@@ -208,6 +219,30 @@ class FormatHwpxTest(unittest.TestCase):
         self.assertEqual(res2["fix"]["clones"], [])
         self.assertEqual(res2["fix"]["changed_parts"], [])
         self.assertEqual(res2["summary_before"], res2["summary_after"])
+
+    def test_direct_margin_document_roundtrip(self):
+        # switch 없이 저장된 문서(한글 10 build 5760 형식): 읽을 때 1pt=200 으로 환산하고, 고친 뒤 다시 읽어도 같은 값
+        import re
+        from hwpx_fixture import HEADER
+        direct_header = re.sub(r"<hp:switch><hp:case[^>]*>(.*?)</hp:case><hp:default>.*?</hp:default></hp:switch>", r"\1", HEADER)
+        direct_header = re.sub(r'<hc:(intent|left|right|prev|next) value="(-?\d+)"',
+                               lambda m: '<hc:%s value="%d"' % (m.group(1), int(m.group(2)) * 2), direct_header)
+        src = self.dir / "direct.hwpx"
+        with zipfile.ZipFile(self.src) as z, zipfile.ZipFile(src, "w") as o:
+            for i in z.infolist():
+                o.writestr(i, direct_header.encode("utf-8") if i.filename == "Contents/header.xml" else z.read(i.filename))
+        a = inspect_hwpx(str(src))
+        self.assertEqual(a["format_definitions"]["para_properties"]["0"]["margin_source"], "direct")
+        self.assertEqual(a["format_definitions"]["para_properties"]["3"]["margin"]["left_pt"], 10.0)   # 2000/200
+        res = self._run(src=src, name="direct_out")
+        self.assertTrue(res["ok"], res["errors"])
+        b = inspect_hwpx(str(res["output"]))
+        heading = next(p for p in b["paragraphs"] if p["text"].startswith("1. 현황"))
+        # '1. ' 의 숫자·마침표·공백은 영문 슬롯(픽스처는 휴먼명조) 폭: 16pt × (0.5 + 0.27 + 0.5) = 20.31pt
+        self.assertEqual(heading["para_format"]["indent_pt"], -20.31)
+        with zipfile.ZipFile(res["output"]) as z:
+            h = z.read("Contents/header.xml").decode("utf-8")
+        self.assertIn('<hc:intent value="-4062" unit="HWPUNIT"/>', h)        # 20.31pt × 200 (switch 없는 문서)
 
     def test_page_margin_fixed_but_paper_size_not(self):
         bad = self.dir / "letter.hwpx"

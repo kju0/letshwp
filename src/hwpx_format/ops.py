@@ -62,32 +62,33 @@ def op_set_para_line_spacing(data, root, a):
     return edits
 
 
+def margin_value(pt, margin, root):
+    """여백 저장값: hp:switch 의 case(HwpUnitChar) 분기는 pt×100, switch 가 없는 문단 모양과 default 분기는 pt×200.
+    근거: 한글 10(5760) 저장 sample_original 은 switch 없이 '  □ '(폭 35pt) 내어쓰기를 -7000 으로 기록(docs/HWPX_STRUCTURE.md)."""
+    base = float(pt) * HWPUNIT_PER_PT
+    return int(round(base if margin.has_ancestor("case", stop=root) else base * 2))
+
+
 def op_set_para_space_before(data, root, a):
-    # case(HwpUnitChar) 와 switch 없는 margin 은 pt×100, default 는 그 2배(샘플 183개 전수 2배 관측)
-    base = int(round(float(a["to"]) * HWPUNIT_PER_PT))
     edits = []
     for margin in _only(list(root.iter("margin")), "hh:margin"):
         for prev in _only(margin.kids("prev"), "hc:prev"):
             unit = prev.attrs.get("unit", "HWPUNIT")
             if unit != "HWPUNIT":
                 raise OpNotApplicable("문단 위 간격 단위가 HWPUNIT 이 아님(%s)" % unit)
-            value = base * 2 if margin.has_ancestor("default", stop=root) else base
-            edits.append(set_attr_edit(data, prev, "value", value))
+            edits.append(set_attr_edit(data, prev, "value", margin_value(a["to"], margin, root)))
     return edits
 
 
 def op_set_para_hanging_indent(data, root, a):
-    # hc:intent 음수 = 내어쓰기. case(HwpUnitChar)·switch 없는 margin 은 pt×100, default 는 그 2배(샘플 관측).
-    # 왼쪽 여백(hc:left)은 바꾸지 않는다.
-    base = int(round(float(a["to"]) * HWPUNIT_PER_PT))
+    # hc:intent 음수 = 내어쓰기. 왼쪽 여백(hc:left)은 바꾸지 않는다.
     edits = []
     for margin in _only(list(root.iter("margin")), "hh:margin"):
         for intent in _only(margin.kids("intent"), "hc:intent"):
             unit = intent.attrs.get("unit", "HWPUNIT")
             if unit != "HWPUNIT":
                 raise OpNotApplicable("들여쓰기 단위가 HWPUNIT 이 아님(%s)" % unit)
-            value = base * 2 if margin.has_ancestor("default", stop=root) else base
-            edits.append(set_attr_edit(data, intent, "value", value))
+            edits.append(set_attr_edit(data, intent, "value", margin_value(a["to"], margin, root)))
     return edits
 
 

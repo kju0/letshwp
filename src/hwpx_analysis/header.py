@@ -226,8 +226,10 @@ class HeaderInfo:
             margin_el, margin_src, margin_default = resolve_switch_child(pp, "margin")
             ls_el, ls_src, ls_default = resolve_switch_child(pp, "lineSpacing")
 
-            margin, margin_units = self._margin(margin_el)
-            default_margin = self._margin(margin_default)[0] if margin_default is not None else None
+            # 여백 값의 단위: hp:switch 의 case(2016/HwpUnitChar)는 1pt = 100, switch 가 없는(direct) 문서와 default 분기는
+            # 그 2배(1pt = 200). 근거: docs/HWPX_STRUCTURE.md 2장(sample_original: direct -7000 = '  □ ' 14pt 폭 35pt)
+            margin, margin_units = self._margin(margin_el, margin_scale(margin_src))
+            default_margin = self._margin(margin_default, 100)[0] if margin_default is not None else None   # 원값(÷100) 그대로 병기
 
             line_spacing = None
             if ls_el is not None:
@@ -271,8 +273,9 @@ class HeaderInfo:
                 "border_fill_id": to_int(border.get("borderFillIDRef")) if border is not None else None,
             }
 
-    def _margin(self, margin_el):
-        """hh:margin -> {indent, left, right, prev, next} (pt). 단위가 HWPUNIT 이 아니면 원값을 남긴다."""
+    def _margin(self, margin_el, scale=100):
+        """hh:margin -> {indent, left, right, prev, next} (pt). scale = 1pt 당 저장값(case 100, direct/default 200).
+        단위가 HWPUNIT 이 아니면 원값을 남긴다."""
         if margin_el is None:
             return None, None
         out, units = {}, set()
@@ -285,7 +288,7 @@ class HeaderInfo:
             unit = e.get("unit") or "HWPUNIT"
             units.add(unit)
             if unit == "HWPUNIT":
-                out[key + "_pt"] = to_pt(v)
+                out[key + "_pt"] = None if v is None else round(v / float(scale), 2)
             else:
                 out[key + "_raw"] = v
                 out[key + "_unit"] = unit
@@ -327,6 +330,11 @@ class HeaderInfo:
             "tab_properties": {str(k): v for k, v in self.tab_props.items()},
             "begin_num": self.begin_num,
         }
+
+
+def margin_scale(source):
+    """여백 값 1pt 당 저장값. hp:switch 의 case 분기만 100, 그 외(switch 없음·default)는 200."""
+    return 100 if source and str(source).startswith("switch:case") else 200
 
 
 def summarize_char(cp):
@@ -376,4 +384,5 @@ def summarize_para(pp):
         "break_hangul": (pp.get("break") or {}).get("breakNonLatinWord"),
         "break_latin": (pp.get("break") or {}).get("breakLatinWord"),
         "value_source": pp.get("margin_source"),
+        "margin_scale": margin_scale(pp.get("margin_source")),
     }
