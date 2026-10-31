@@ -26,7 +26,7 @@ Claude Code 는 세션을 시작할 때 이 문서를 먼저 읽는다. 개발 �
 | 배포 실행기 | scripts/deploy.py, deploy/ | 완료(2026-10-28) |
 
 - 표준 라이브러리만 사용한다(폐쇄망).
-- 테스트: `python3 -m unittest discover -s tests`. 2026-10-31 기준 190개 통과(봇·배포·글꼴·switch 없는 문서·쪽 나눔 픽스처 포함), 실제 샘플·글꼴 파일 테스트는 환경변수/파일이 있을 때만 실행.
+- 테스트: `python3 -m unittest discover -s tests`. 2026-10-31 기준 197개 통과(봇·배포·글꼴·switch 없는 문서·쪽 나눔·번호 교정·쪽 번호 포함), 실제 샘플·글꼴 파일 테스트는 환경변수/파일이 있을 때만 실행.
 
 ## 3. 작업 이력
 1. **Inspector**:
@@ -151,6 +151,17 @@ Claude Code 는 세션을 시작할 때 이 문서를 먼저 읽는다. 개발 �
    - 이어서 사용자 결정: 쪽 마지막 줄 대제목('2.') 앞 빈 문단은 남기고, 이미 쪽 맨 위인 대제목('4.') 앞 빈 문단만 지운다
      (PAGE_BREAK_HEADING.delete_blank_only_page_first=true). sample_original 수정본 ↔ wannabe: 문단 수·텍스트·표·서식 정의·쪽 나눔 모두 일치,
      남은 차이는 줄 배치 캐시 값뿐(wannabe 는 한글이 다시 저장해 캐시가 새로 계산됨, 수정본은 한글이 열 때 다시 계산). 190개 통과.
+
+15. **sample_puzzle1 → wannabe: 번호·기호 순서 교정, 쪽 번호 추가**(2026-10-31, 사용자 요청 5항목):
+   - puzzle1 과 wannabe 의 차이: '    - 7개 은행'→'ㅇ', '다.'→'나.', '바.'→'라.', '5. 향후'→'4.', 빈 문단 1개, 제목 20→22pt, 쪽 번호 없음→있음, 쪽 나눔.
+   - ITEM_NUMBER 자동 수정: 같은 단계 1부터 순서(상위 바뀌면 재시작), 번호 문자만 교정(op replace_marker, 여러 run 에 나뉜 번호도 같은 길이면 교정). 표준 밖 표기는 수동.
+   - ITEM_BULLET 자동 수정: 첫 기호 □, 한 층위씩만 내려감(건너뛰면 바로 아래 층위 기호). 표준 밖 기호는 수동.
+   - PAGE_NUMBER 자동 수정: 없으면 첫 문단 secPr run 끝에 hp:pageNum(BOTTOM_CENTER, DIGIT, '-') 추가(op add_page_number). 다른 양식은 UNKNOWN.
+   - 내어쓰기 폭은 교정 후 번호·기호로 계산(doc.marker_targets). verify 는 번호·기호 문자 교정·쪽 번호 컨트롤 추가만 허용하는 검사 추가.
+   - CLAUDE.md 절대 원칙 예외 3가지 명시(번호·기호 문자, 빈 문단 삭제, 쪽 번호 컨트롤). 제목 22pt 는 기존 규칙으로 이미 처리.
+   - 사용자 결정(2026-10-31): 대제목 번호는 순서대로 1·2·3·4 로 교정한다. wannabe 의 1, 2, 4, 5 는 원본 작성자의 누락이며, wannabe 검사의 ITEM_NUMBER FAIL 2건은 의도된 차이.
+   - puzzle1 의 쪽 나눔은 puzzle1 자체의 줄 배치 캐시 기준이라 wannabe(원본 배치 기준)와 위치가 다를 수 있다('2.'는 puzzle1 에서 쪽 중간).
+   - 결과: puzzle1 수정 FAIL 8 → 0, 동작 8개(번호 4·기호 1·쪽 번호 1·제목 22pt·쪽 나눔 1), 검증 통과. wannabe 와 남은 차이 = 대제목 번호 2곳(3·4 vs 4·5)과 빈 문단 1개.
 
 ## 4. 핵심 기술 판단 (근거: docs/HWPX_STRUCTURE.md)
 - charPr/paraPr ID 하나가 완전한 속성 집합이다. 스타일 상속을 계산할 필요가 없다.
