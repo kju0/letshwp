@@ -234,15 +234,21 @@ class FormatHwpxTest(unittest.TestCase):
         a = inspect_hwpx(str(src))
         self.assertEqual(a["format_definitions"]["para_properties"]["0"]["margin_source"], "direct")
         self.assertEqual(a["format_definitions"]["para_properties"]["3"]["margin"]["left_pt"], 10.0)   # 2000/200
-        res = self._run(src=src, name="direct_out")
+        # 글꼴 파일 유무와 관계없이 같은 값이 나오도록 글꼴 폴더를 비운 설정으로 실행(글자 수 근사)
+        import checker
+        cfg, _ = checker.load_config()
+        cfg["rules"]["HANGING_INDENT"]["font_dir"] = str(self.dir / "no-fonts")
+        cfg_path = self.dir / "cfg.json"
+        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+        res = format_hwpx(src, self.dir / "direct_out", config_path=str(cfg_path))
         self.assertTrue(res["ok"], res["errors"])
         b = inspect_hwpx(str(res["output"]))
         heading = next(p for p in b["paragraphs"] if p["text"].startswith("1. 현황"))
-        # '1. ' 의 숫자·마침표·공백은 영문 슬롯(픽스처는 휴먼명조) 폭: 16pt × (0.5 + 0.27 + 0.5) = 20.31pt
-        self.assertEqual(heading["para_format"]["indent_pt"], -20.31)
+        # 근사: '1. ' = 16pt × (0.5 + 0.5 + 0.5) = 24pt
+        self.assertEqual(heading["para_format"]["indent_pt"], -24.0)
         with zipfile.ZipFile(res["output"]) as z:
             h = z.read("Contents/header.xml").decode("utf-8")
-        self.assertIn('<hc:intent value="-4062" unit="HWPUNIT"/>', h)        # 20.31pt × 200 (switch 없는 문서)
+        self.assertIn('<hc:intent value="-4800" unit="HWPUNIT"/>', h)        # 24pt × 200 (switch 없는 문서)
 
     def test_page_margin_fixed_but_paper_size_not(self):
         bad = self.dir / "letter.hwpx"
