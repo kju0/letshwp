@@ -228,6 +228,10 @@ def gate_by_role(doc, p, rule_id):
     rc = doc.rule_cfg(rule_id)
     role = p.get("spec_role") or p["role"]["role"]
     by_role = rc.get("by_role") or {}
+    h = p.get("hierarchy") or {}
+    if rule_id == "FONT" and h.get("kind") == "item" and (h.get("level") or 0) >= 3 and "heading_3" in by_role:
+        # 요구사항 3·4: '1.'·'가.' 만 HY헤드라인M, '1)' 이하 번호 항목은 휴먼명조. 분류기 역할(글꼴로 제목 추정)과 무관하게 적용
+        return "check", by_role["heading_3"]
     if role in STRUCTURAL_SKIP_ROLES and role not in by_role:
         return "skip", STRUCTURAL_SKIP_ROLES[role]
     if not p.get("spec_role"):

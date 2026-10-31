@@ -36,8 +36,9 @@ NOTE6_CONFIG["rules"]["PARA_SPACING"]["note_above_pt"] = 6
 FACES = {"hangul": "휴먼명조", "latin": "휴먼명조", "symbol": "휴먼명조"}
 
 
-def _cid(size):
-    return 100 + int(round(size * 10))
+def _cid(size, font="휴먼명조"):
+    # 글자 크기(와 글꼴)마다 다른 charPr id: 글꼴이 다른 문단이 같은 정의를 공유하지 않게 한다
+    return 100 + int(round(size * 10)) + (5000 if font != "휴먼명조" else 0)
 
 
 def P(text, space_before=0.0, role=None, indent=0.0, lines=1, page_break=False, objects=None,
@@ -59,8 +60,8 @@ def P(text, space_before=0.0, role=None, indent=0.0, lines=1, page_break=False, 
         "para_format": {"para_pr_id": para_pr_id, "space_before_pt": space_before, "space_after_pt": space_after,
                         "indent_pt": indent, "left_margin_pt": 0.0, "align": "JUSTIFY", "keep_with_next": "0",
                         "line_spacing_type": "PERCENT", "line_spacing_value": 160, "line_spacing": "160%"},
-        "char_format": {"char_pr_id": _cid(size), "font_hangul": font, "size_pt": size},
-        "runs": [{"char_pr_id": _cid(size), "chars": len(text)}],
+        "char_format": {"char_pr_id": _cid(size, font), "font_hangul": font, "size_pt": size},
+        "runs": [{"char_pr_id": _cid(size, font), "chars": len(text)}],
         "line_layout": dict({"line_count": lines, "lines": [{"textpos": 0, "horzpos_pt": 0.0, "horzsize_pt": 480.0}] * lines,
                              "source": "test"}, **(layout or {})),
     }
@@ -84,7 +85,7 @@ def inspection(paragraphs, app="Hancom Office Hangul", tables=None, para_props=N
         cf = p["char_format"]
         if cf["char_pr_id"] >= 100:
             char_props.setdefault(str(cf["char_pr_id"]), {
-                "id": cf["char_pr_id"], "font_face": dict(FACES), "size_pt": cf["size_pt"],
+                "id": cf["char_pr_id"], "font_face": dict(FACES, hangul=cf.get("font_hangul") or "휴먼명조"), "size_pt": cf["size_pt"],
                 "ratio": {"hangul": 100, "latin": 100}, "spacing": {"hangul": 0, "latin": 0}})
     return {
         "schema_version": "1.0", "paragraphs": paragraphs, "tables": tables or [],
@@ -759,3 +760,16 @@ class ItemOrderTest(unittest.TestCase):
         # '-'(0.5칸) → 'ㅇ'(1칸) 로 교정될 예정이면 내어쓰기 폭도 ㅇ 기준: 공백 7 + ㅇ 14 + 공백 7 = 28
         out, _ = hanging([P("□ 항목", lines=2), P(" - 세부 항목", lines=2)])
         self.assertEqual(out[(1, "둘째 줄 정렬")]["expected"]["value"]["indent_pt"], -28.0)
+
+
+class SubItemFontTest(unittest.TestCase):
+    def test_numbered_sub_items_expect_myeongjo_regardless_of_role(self):
+        # '1)' 이하 번호 항목은 분류기가 제목으로 추정해도(HY헤드라인M 때문에) 휴먼명조 기준.
+        # 글꼴을 고친 뒤 추정 역할이 바뀌어도 재검사가 판단 불가로 떨어지지 않는다(sample_puzzle2 검증 실패 버그)
+        paras = [P("1. 대제목", font="HY헤드라인M"), P(" 가. 중제목", font="HY헤드라인M"),
+                 P("  1) 소제목", role="heading_3", font="HY헤드라인M", confidence=0.65),
+                 P("  2) 소제목", role="unclassified", font="휴먼명조", confidence=0.4)]
+        by_idx, _ = rule_results(paras, "FONT")
+        self.assertEqual((by_idx[2]["status"], by_idx[2]["expected"]["value"]), ("FAIL", "휴먼명조"))
+        self.assertEqual(by_idx[3]["status"], "PASS")                       # 미분류여도 번호 기준으로 판정
+        self.assertEqual(by_idx[0]["expected"]["value"], "HY헤드라인M")
