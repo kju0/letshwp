@@ -9,7 +9,9 @@
       "spec_mode": "검사만",
       "spec_text": "표지·목차가 없는 문서는 상단 제목 박스 사용. 높이 15mm, 양단선 1mm. 표지·목차 사용 시 본문 상단 제목 생략",
       "height_mm": 15.0,
-      "double_line_width_mm": 1.0
+      "double_line_width_mm": 1.0,
+      "protect_contents": true,
+      "_protect_comment": "2026-10-31 사용자 결정: 문서 제목 박스(문서 제목을 담은 1열 표) 안의 문단은 글자 크기를 포함해 어떤 서식도 바꾸지 않는다(검사 결과는 판단 불가로 보고)."
     },
     "PAPER_SIZE": {
       "name": "용지 크기",

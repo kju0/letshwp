@@ -127,6 +127,23 @@ class CheckerFixtureTest(unittest.TestCase):
         self.assertIn("신뢰도", r2["unknown_reason"])
 
     # 5. 표준값 미확정 -> UNKNOWN/SKIP
+    def test_title_box_contents_are_protected(self):
+        # 제목 박스(1열 표) 안 문단은 기준과 달라도 수정하지 않는다(2026-10-31 사용자 결정)
+        ins = copy.deepcopy(self.inspection)
+        t = ins["tables"][0]
+        t["cols"], t["rows"] = 1, 1
+        cell_par = para(ins, "연도별 실적")
+        t["cells"] = [{"paragraphs": [cell_par["index"]], "row": 0, "col": 0, "row_span": 1, "col_span": 1,
+                       "border_fill_id": 2, "borders": {}, "text": cell_par["text"]}]
+        cell_par["role"].update(role="document_title", label="문서 제목", confidence=0.9)
+        results = self.check(ins)
+        for rid in ("FONT", "CHAR_RATIO"):                     # (줄 간격은 문서 제목 역할의 기준이 없어 묶음 SKIP)
+            r = one(results, rid, "연도별")
+            self.assertEqual((r["status"], r["fix"]["actions"]), ("UNKNOWN", []), rid)
+            self.assertIn("제목 박스", r["unknown_reason"])
+        r = one(results, "FONT", "2024")                        # 같은 문서의 다른 표 셀은 그대로 수정 대상
+        self.assertEqual(r["status"], "FAIL")
+
     def test_undecided_standard(self):
         title = one(self.results, "FONT_SIZE", "보고서 제목")
         self.assertEqual((title["status"], title["expected"]["value"]), ("FAIL", 22))   # '목차'(HY헤드라인M) 없음 → 표지 없는 문서

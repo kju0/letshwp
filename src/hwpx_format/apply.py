@@ -117,7 +117,14 @@ def op_add_page_number(data, root, a):
     to = a["to"]
     xml = ('<%(p)sctrl><%(p)spageNum pos="%(pos)s" formatType="%(fmt)s" sideChar="%(side)s"/></%(p)sctrl>'
            % {"p": prefix, "pos": to["pos"], "fmt": to["format"], "side": to["side_char"]}).encode("utf-8")
-    at = run.children[-1].end if run.children else run.stag_end
+    # 한글(wannabe)이 저장한 위치와 같게: 구역 설정 run 바로 다음 run 의 맨 앞. 다음 run 이 없으면 구역 설정 run 의 끝
+    para = run.parent
+    runs = para.kids("run") if para is not None else []
+    nxt = None
+    for i, r in enumerate(runs):
+        if r is run and i + 1 < len(runs):
+            nxt = runs[i + 1]
+    at = nxt.stag_end if nxt is not None else (run.children[-1].end if run.children else run.stag_end)
     return [(at, at, xml)]
 
 

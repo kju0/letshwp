@@ -78,6 +78,12 @@ class Doc:
         self.font_size_targets = {}
         # ITEM_NUMBER/ITEM_BULLET 규칙이 채우는 '교정 후 번호·기호' (문단 index -> (현재, 교정)). HANGING_INDENT 가 교정 후 폭으로 계산
         self.marker_targets = {}
+        # 문서 제목 박스 안 문단: 사용자 결정(2026-10-31)으로 어떤 서식도 바꾸지 않는다(FAIL → 판단 불가로 보고)
+        self.protected_paragraphs = set()
+        if (config["rules"].get("DOC_TITLE_BOX") or {}).get("protect_contents"):
+            for t, _ in _title_boxes(self):
+                for c in t.get("cells") or []:
+                    self.protected_paragraphs.update(c.get("paragraphs") or [])
         self._cover = None
         # 내어쓰기 폭 계산용 글꼴 폭 표: 글꼴 폴더(설정 HANGING_INDENT.font_dir > 환경 변수 LETSHWP_FONT_DIR > <저장소>/fonts)
         hi = config["rules"].get("HANGING_INDENT") or {}
@@ -167,6 +173,12 @@ def make_result(doc, rule_id, status, reason, target=None, role=None, current=No
                 fix_mode=None, blocked_reason=None, recommendation=None):
     rc = doc.rule_cfg(rule_id)
     mode = fix_mode or FIX_MODE_BY_SPEC.get(rc["spec_mode"], "none")
+    if status == FAIL and (target or {}).get("type") == "paragraph" and target.get("paragraph_index") in doc.protected_paragraphs:
+        # 제목 박스 안 문단은 바꾸지 않는다: 위반을 지적하되 판단 불가(수정 계획에 넣지 않음)로 보고
+        status, fix_actions = UNKNOWN, None
+        unknown_reason = "문서 제목 박스 안의 문단은 서식을 바꾸지 않음(2026-10-31 사용자 결정). 기준과 다른 점: " + reason
+        needed_info = needed_info or "제목 박스 서식은 작성자가 직접 조정"
+        reason = "제목 박스 안 문단 - 수정하지 않음"
     fix = {"mode": mode, "possible": False, "recommendation": None, "actions": []}
     if status == FAIL:
         if mode in ("auto", "auto_if_role_confirmed") and fix_actions and not blocked_reason:
