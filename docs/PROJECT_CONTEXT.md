@@ -26,7 +26,7 @@ Claude Code 는 세션을 시작할 때 이 문서를 먼저 읽는다. 개발 �
 | 배포 실행기 | scripts/deploy.py, deploy/ | 완료(2026-10-28) |
 
 - 표준 라이브러리만 사용한다(폐쇄망).
-- 테스트: `python3 -m unittest discover -s tests`. 2026-10-31 기준 198개 통과(봇·배포·글꼴·switch 없는 문서·쪽 나눔·번호 교정·쪽 번호 포함), 실제 샘플·글꼴 파일 테스트는 환경변수/파일이 있을 때만 실행.
+- 테스트: `python3 -m unittest discover -s tests`. 2026-10-31 기준 207개 통과(봇·배포·글꼴·switch 없는 문서·쪽 나눔·번호 교정·쪽 번호·봇 조용한 연결 유지 포함), 실제 샘플·글꼴 파일 테스트는 환경변수/파일이 있을 때만 실행.
 
 ## 3. 작업 이력
 1. **Inspector**:
@@ -178,6 +178,14 @@ Claude Code 는 세션을 시작할 때 이 문서를 먼저 읽는다. 개발 �
 17. **제목 박스 보호**(2026-10-31, 사용자 결정): 문서 제목 박스 안 문단은 글자 크기(22pt 규칙 포함) 등 어떤 서식도 바꾸지 않는다(Doc.protected_paragraphs, make_result 에서 FAIL→UNKNOWN).
    이유: 15mm 고정 칸에서 20→22pt 로 키우자 제목 위아래 여백이 줄었다(sample_puzzle1 수정본 3). 쪽 번호 컨트롤은 wannabe 와 같은 위치(표 run 맨 앞)로 옮김.
 
+18. **봇 WebSocket 150초 주기 끊김 수정 + 시연 영상 준비**(2026-10-31):
+   - 서버 로그: 첫 배포(10-28)부터 "90초 동안 응답이 없습니다" 로 150초마다 끊고 재접속(시간당 24회, 총 1,760회). 재접속 대기(2→60초) 동안 올라온 글은 받지 못함.
+   - 원인: listen_once 가 텍스트 이벤트만 '응답'으로 세고, 자기가 보낸 ping 의 pong 은 세지 않았다. 조용한 채널에서는 pong 만 오므로 90초마다 끊김.
+   - 수정: WebSocket.last_frame_at(모든 프레임 수신 시 갱신)·idle_seconds(), Bot(ws_timeout=30, idle_limit=90) 로 pong 도 생존 신호로 인정. 테스트 QuietConnectionTest 3개 추가.
+   - **push·배포 전**(사용자 결정 필요). 배포 후 `deploy.py status` 에서 connected 가 유지되는지 확인할 것.
+   - docs/DEMO_VIDEO_PLAN.md: 시연 시나리오(인트로·자막·장면별), 봇이 보낼 메시지, 촬영 준비 체크리스트(모니터 2개, 한글 없음, 샘플별 수정 건수).
+     sample_original 수정: FAIL 30 → 0, 동작 7개(다음 문단과 함께 28 + 번호 2). puzzle1: 34 → 0, 11개. test1: 35 → 5, 23개.
+
 ## 4. 핵심 기술 판단 (근거: docs/HWPX_STRUCTURE.md)
 - charPr/paraPr ID 하나가 완전한 속성 집합이다. 스타일 상속을 계산할 필요가 없다.
 - `hp:switch` 는 이해하는 첫 case(2016/HwpUnitChar, 2016/paragraph 네임스페이스)를 쓰고, 없으면 default 를 쓴다. default 의 여백 값은 case 값의 2배로 저장된다.
@@ -225,6 +233,7 @@ Claude Code 는 세션을 시작할 때 이 문서를 먼저 읽는다. 개발 �
 - [ ] 미등록 글꼴(문서 글꼴 목록에 없는 휴먼명조/HY헤드라인M)을 목록에 추가해 적용할지(현재는 미적용 보고).
 
 - [ ] 봇이 답할 채널 범위(현재 DM + 멘션, deploy.json 의 channels 에 넣은 채널에만 봇이 들어가 있음).
+- [ ] 봇 끊김 수정 코드(18번) push·배포. 시연 영상 촬영 전 필수.
 - [ ] 첨부·결과 보관 기간(현재 30일 후 자동 삭제).
 
 ## 7. 다음 후보 작업
