@@ -10,6 +10,7 @@ import os
 import socket
 import ssl
 import struct
+import time
 from urllib.parse import urlsplit
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -82,6 +83,8 @@ class WebSocket:
         self.sock = sock
         self._buf = b""
         self._parts = []
+        # 마지막으로 서버 프레임(텍스트·ping·pong 모두)을 받은 시각. 연결이 살아 있는지 판단할 때 쓴다.
+        self.last_frame_at = time.monotonic()
         key = base64.b64encode(os.urandom(16)).decode()
         path = (parts.path or "/") + ("?" + parts.query if parts.query else "")
         host = parts.hostname + ("" if parts.port is None else ":%d" % parts.port)
@@ -109,6 +112,7 @@ class WebSocket:
             if got:
                 frame, used = got
                 self._buf = self._buf[used:]
+                self.last_frame_at = time.monotonic()
                 return frame
             chunk = self.sock.recv(65536)
             if not chunk:
@@ -121,8 +125,13 @@ class WebSocket:
     def ping(self):
         self.sock.sendall(encode_frame(OP_PING, b""))
 
+    def idle_seconds(self):
+        """마지막 서버 프레임(pong 포함) 이후 지난 시간(초)."""
+        return time.monotonic() - self.last_frame_at
+
     def recv_text(self):
-        """텍스트 메시지 하나를 돌려준다. ping 에는 pong 으로 답한다. 시간 초과 시 socket.timeout."""
+        """텍스트 메시지 하나를 돌려준다. ping 에는 pong 으로 답한다. 시간 초과 시 socket.timeout.
+        pong·ping 프레임도 last_frame_at 을 갱신하므로, 이벤트가 없는 조용한 시간에도 연결이 살아 있음을 알 수 있다."""
         while True:
             fin, opcode, payload = self._next_frame()
             if opcode == OP_PING:

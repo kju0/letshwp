@@ -40,12 +40,15 @@ def should_handle(event, bot_id, bot_username):
 
 
 class Bot:
-    def __init__(self, client, data_dir, max_file_mb=50, keep_days=30, runner_timeout=600):
+    def __init__(self, client, data_dir, max_file_mb=50, keep_days=30, runner_timeout=600,
+                 ws_timeout=30, idle_limit=90):
         self.client = client
         self.data_dir = Path(data_dir)
         self.max_bytes = int(max_file_mb * 1024 * 1024)
         self.keep_days = keep_days
         self.runner_timeout = runner_timeout
+        self.ws_timeout = ws_timeout      # 이 시간 동안 프레임이 없으면 ping 을 보낸다
+        self.idle_limit = idle_limit      # 이 시간 동안 어떤 프레임(pong 포함)도 없으면 끊고 다시 접속한다
         self.jobs = queue.Queue()
         self.me = None
         self.status_path = self.data_dir / "status.json"
@@ -129,18 +132,18 @@ class Bot:
 
     # --- 이벤트 수신 ---
     def listen_once(self):
-        ws = self.client.websocket(timeout=30)
+        ws = self.client.websocket(timeout=self.ws_timeout)
         log.info("WebSocket 연결됨")
         self.write_status(connected=True, connected_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
-        last = time.time()
         try:
             while True:
                 try:
                     raw = ws.recv_text()
-                    last = time.time()
                 except socket.timeout:
-                    if time.time() - last > 90:
-                        raise WebSocketError("90초 동안 응답이 없습니다.")
+                    # 이벤트가 없어도 ping 에 대한 pong 이 오면 연결은 살아 있다(pong 도 last_frame_at 을 갱신).
+                    # 이전에는 텍스트 이벤트만 '응답'으로 세어 조용한 채널에서 150초마다 끊고 다시 붙었다.
+                    if ws.idle_seconds() > self.idle_limit:
+                        raise WebSocketError("%d초 동안 응답이 없습니다." % self.idle_limit)
                     ws.ping()
                     continue
                 try:

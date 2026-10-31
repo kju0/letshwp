@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mmbot import handler  # noqa: E402
 from mmbot.bot import Bot, should_handle  # noqa: E402
 from mmbot.client import MattermostClient, MattermostError, encode_multipart  # noqa: E402
-from mmbot.websocket import (WebSocket, WebSocketClosed, encode_frame, parse_frame, GUID,  # noqa: E402
+from mmbot.websocket import (WebSocket, WebSocketClosed, WebSocketError, encode_frame, parse_frame, GUID,  # noqa: E402
                              OP_TEXT, OP_PING, OP_PONG, OP_CLOSE, OP_CONT)
 from run_bot import load_env, settings, main as run_bot_main  # noqa: E402
 from hwpx_fixture import build_fixture  # noqa: E402
@@ -100,6 +100,99 @@ class WebSocketClientTest(unittest.TestCase):
             ws.recv_text()
         ws.close()
         srv.join(2)
+
+
+class QuietWsServer(threading.Thread):
+    """이벤트를 보내지 않는 조용한 서버. 클라이언트 ping 에 pong 으로 답하고(answer_pings), 일정 시간 뒤 close 를 보낸다."""
+
+    def __init__(self, answer_pings, close_after):
+        super().__init__(daemon=True)
+        self.srv = socket.socket()
+        self.srv.bind(("127.0.0.1", 0))
+        self.srv.listen(1)
+        self.port = self.srv.getsockname()[1]
+        self.answer_pings, self.close_after = answer_pings, close_after
+        self.pings = 0
+
+    def run(self):
+        conn, _ = self.srv.accept()
+        req = b""
+        while b"\r\n\r\n" not in req:
+            req += conn.recv(4096)
+        hdrs = dict(l.split(": ", 1) for l in req.decode().split("\r\n")[1:] if ": " in l)
+        acc = base64.b64encode(hashlib.sha1((hdrs["Sec-WebSocket-Key"] + GUID).encode()).digest()).decode()
+        conn.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                      "Sec-WebSocket-Accept: %s\r\n\r\n" % acc).encode())
+        conn.settimeout(0.05)
+        end = time.time() + self.close_after
+        buf = b""
+        while time.time() < end:
+            try:
+                buf += conn.recv(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            while True:
+                got = parse_frame(buf)
+                if not got:
+                    break
+                (fin, op, payload), used = got
+                buf = buf[used:]
+                if op == OP_PING:
+                    self.pings += 1
+                    if self.answer_pings:
+                        conn.sendall(server_frame(OP_PONG, payload))
+        try:
+            conn.sendall(server_frame(OP_CLOSE, b""))
+        except OSError:
+            pass
+        time.sleep(0.1)
+        conn.close()
+        self.srv.close()
+
+
+class QuietConnectionTest(unittest.TestCase):
+    """이벤트가 없는 조용한 채널에서도 pong 이 오면 연결을 유지해야 한다(배포 후 150초마다 끊기던 버그)."""
+
+    def make_bot(self, port, tmp):
+        class C:
+            def websocket(self, timeout):
+                return WebSocket("ws://127.0.0.1:%d/api/v4/websocket" % port, timeout=timeout)
+        bot = Bot(C(), tmp, ws_timeout=0.1, idle_limit=0.5)
+        bot.me = {"id": "b1", "username": "letshwp"}
+        return bot
+
+    def test_pong_keeps_connection_alive(self):
+        srv = QuietWsServer(answer_pings=True, close_after=1.5)
+        srv.start()
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = self.make_bot(srv.port, tmp)
+            t0 = time.time()
+            with self.assertRaises(WebSocketClosed):   # idle 한도(0.5초)를 훨씬 넘겨도 서버가 끊을 때까지 유지
+                bot.listen_once()
+            self.assertGreater(time.time() - t0, 1.2)
+        self.assertGreaterEqual(srv.pings, 5)
+        srv.join(2)
+
+    def test_no_pong_disconnects_after_idle_limit(self):
+        srv = QuietWsServer(answer_pings=False, close_after=5)
+        srv.start()
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = self.make_bot(srv.port, tmp)
+            t0 = time.time()
+            with self.assertRaisesRegex(WebSocketError, "응답이 없습니다"):
+                bot.listen_once()
+            self.assertLess(time.time() - t0, 3)
+        srv.join(6)
+
+    def test_pong_frame_updates_last_frame_at(self):
+        ws = WebSocket.__new__(WebSocket)
+        ws._buf, ws._parts, ws.last_frame_at = server_frame(OP_PONG, b"") + server_frame(OP_TEXT, b"{}"), [], 0
+        ws.sock = None
+        self.assertEqual(ws.recv_text(), "{}")
+        self.assertGreater(ws.last_frame_at, 0)
+        self.assertLess(ws.idle_seconds(), 1)
 
 
 class FakeApi(BaseHTTPRequestHandler):
