@@ -496,7 +496,11 @@ def rule_word_break(doc):
     한글 저장 HWPX 는 breakNonLatinWord 의 값 이름이 동작과 반대(BREAK_WORD=어절, KEEP_WORD=글자)다. 근거는 설정 _comment 와
     docs/HWPX_STRUCTURE.md 참조. 줄바꿈 위치와 양쪽 정렬의 공백 조정은 한글이 문서를 열 때 다시 계산한다."""
     rc = doc.rule_cfg("WORD_BREAK")
-    attrs = ((rc["hangul_attr"], rc["hangul_word_unit_value"], "한글 단위", rc.get("hangul_value_labels") or {}),
+    if rc.get("enabled") is False:
+        # 규칙을 끈 경우(2026-10-31 사용자 결정): 검사·수정하지 않고 원본 줄 나눔 기준을 유지
+        return skip_group(doc, "WORD_BREAK", [(p, rc.get("disabled_reason") or "규칙 꺼짐(설정 enabled=false)")
+                                              for p in doc.text_paragraphs()])
+    attrs =((rc["hangul_attr"], rc["hangul_word_unit_value"], "한글 단위", rc.get("hangul_value_labels") or {}),
              (rc["latin_attr"], rc["latin_word_unit_value"], "영어 단위", rc.get("latin_value_labels") or {}))
     want = {a: v for a, v, _, _ in attrs}
 
@@ -799,6 +803,9 @@ def rule_para_spacing(doc):
         if kind == "other":
             skipped.append((p, "번호·기호·주석 기호 없는 %s 문단 - 문단 간격 규칙(항목/주석/일반 본문)으로 간격을 정할 수 없음" % p["role"]["label"]))
             continue
+        if kind == "note" and rc.get("note_above_pt") is None:
+            skipped.append((p, rc.get("note_above_excluded_reason") or "참고·주석 위 간격 기준 없음(검사 제외)"))
+            continue
 
         pf = p.get("para_format") or {}
         cur_v = pf.get("space_before_pt")
@@ -1055,6 +1062,10 @@ def rule_hanging_indent(doc):
                    "display": _indent_label(indent),
                    "source": VALUE_SOURCE + " - paraPr/margin@intent", "refs": {"para_pr_id": pf.get("para_pr_id")},
                    "role_label": p["role"]["label"]}
+        if rc.get("skip_single_line") and trusted and ll and ll.get("line_count") == 1:
+            # 한 줄 문단은 둘째 줄이 없으므로 검사·수정하지 않음(2026-10-31 사용자 결정, sample_original_wannabe 기준)
+            skipped.append((p, "한 줄 문단(한글 저장 줄 배치 기준) - 둘째 줄 정렬 검사 제외"))
+            continue
         if auto:
             results.append(make_result(doc, "HANGING_INDENT", UNKNOWN, "자동 번호 문단의 번호 너비를 알 수 없음",
                                        target_of(p), role_of(p), current, None,
@@ -1083,6 +1094,10 @@ def rule_hanging_indent(doc):
         ok = abs(indent - target) <= tol
         reason = "내어쓰기 %s 기준 %s (허용 오차 ±%gpt)" % (
             _indent_label(indent), ("=" if ok else "≠") + " " + _indent_label(target), tol)
+        if not ok and rc.get("keep_existing_hanging") and indent < 0:
+            # 이미 내어쓰기가 있으면 폭과 관계없이 작성자 값을 존중(2026-10-31 사용자 결정, sample_original_wannabe 기준)
+            ok = True
+            reason = "내어쓰기 %s 가 이미 설정되어 있어 유지 (계산 폭 %s)" % (_indent_label(indent), _indent_label(target))
         actions = None if ok else [{
             "op": "set_para_hanging_indent", "para_pr_id": pf.get("para_pr_id"),
             "xml": "Contents/header.xml hh:paraPr[@id=%s]//hh:margin/hc:intent@value" % pf.get("para_pr_id"),
@@ -1221,6 +1236,14 @@ def rule_line_spacing(doc):
         if cv["type"] != "PERCENT":
             return FAIL, "줄 간격 종류가 '%s'(%s)로 표준의 비율(%%) 방식과 다름" % (
                 LINE_TYPE_LABEL.get(cv["type"], cv["type"]), current["display"]), expected, None
+        lo_hi = (rc.get("allowed_range_by_role") or {}).get(p.get("spec_role") or p["role"]["role"])
+        if lo_hi and cv["value"] != std:
+            # 허용 범위(2026-10-31 사용자 결정): 범위 안이면 적합, 벗어나면 표준값으로 수정
+            expected["display"] = "%d%% (%d~%d%% 허용)" % (std, lo_hi[0], lo_hi[1])
+            expected["allowed_range"] = list(lo_hi)
+            if lo_hi[0] <= cv["value"] <= lo_hi[1]:
+                return PASS, "줄 간격 %d%% 가 허용 범위 %d~%d%% 안" % (cv["value"], lo_hi[0], lo_hi[1]), expected, None
+            return FAIL, "줄 간격 %d%% 가 허용 범위 %d~%d%% 밖 (표준 %d%%)" % (cv["value"], lo_hi[0], lo_hi[1], std), expected, None
         if cv["value"] != std:
             return FAIL, "줄 간격 %d%% ≠ 표준 %d%%" % (cv["value"], std), expected, None
         return PASS, "줄 간격이 표준(%d%%)과 일치" % std, expected, None
@@ -1507,7 +1530,10 @@ def rule_page_break_heading(doc):
         actions = [{"op": "set_page_break", "paragraph_index": p["index"], "from": False, "to": True,
                     "xml": "Contents/section%d.xml hp:p@pageBreak (%s)" % (si, p["path"]),
                     "note": "문단 속성만 바꿈. 줄 배치는 한글이 열 때 다시 계산"}]
-        blanks = _blank_run_before(doc, p) if rc.get("delete_blank_before") else []
+        # 빈 문단은 이미 쪽 맨 위로 밀린 대제목 앞에서만 지운다. 쪽 마지막 줄 대제목 앞의 빈 문단은 남긴다
+        # (2026-10-31 사용자 결정, sample_original_wannabe 기준)
+        blanks = (_blank_run_before(doc, p) if rc.get("delete_blank_before")
+                  and (ll.get("page_first") or not rc.get("delete_blank_only_page_first")) else [])
         for j in blanks:
             actions.append({"op": "delete_empty_paragraph", "paragraph_index": j, "from": "빈 문단", "to": "삭제",
                             "xml": "Contents/section%d.xml hp:p 삭제 (%s)" % (si, doc.paragraphs[j]["path"]),

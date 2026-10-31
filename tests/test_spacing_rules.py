@@ -24,6 +24,13 @@ CONFIG, CONFIG_PATH = load_config()
 # 글꼴 파일 유무와 관계없이 같은 결과가 나오도록 글꼴 폴더를 비운다(글자 수 근사). 글꼴 폭은 test_fontmetrics 에서 검사
 CONFIG["rules"]["HANGING_INDENT"]["font_dir"] = "/nonexistent-letshwp-fonts"
 SPACING = CONFIG["rules"]["PARA_SPACING"]
+# 2026-10-31 사용자 결정(sample_original_wannabe 기준)으로 끄거나 완화한 동작의 계산 자체를 검사할 때 쓰는 설정
+WIDTH_CONFIG = copy.deepcopy(CONFIG)          # 한 줄 문단도 검사, 기존 내어쓰기도 폭 비교
+WIDTH_CONFIG["rules"]["HANGING_INDENT"].update(skip_single_line=False, keep_existing_hanging=False)
+WORD_BREAK_CONFIG = copy.deepcopy(CONFIG)     # 어절 단위 줄 나눔 켬
+WORD_BREAK_CONFIG["rules"]["WORD_BREAK"]["enabled"] = True
+NOTE6_CONFIG = copy.deepcopy(CONFIG)          # 참고·주석 위 6pt 검사
+NOTE6_CONFIG["rules"]["PARA_SPACING"]["note_above_pt"] = 6
 
 
 FACES = {"hangul": "휴먼명조", "latin": "휴먼명조", "symbol": "휴먼명조"}
@@ -207,12 +214,23 @@ class RequiredCasesTest(unittest.TestCase):
     def test_notes(self):
         paras = [P("1. 개요"), P("본문이다.", 6), P("※ 참고 사항", 6), P("* 또 다른 참고", 6), P("다음 본문", 6),
                  P("□ 항목", 6), P("※ 참고", 6), P("□ 다음 항목", 14)]
-        by_idx, _ = spacing(paras)
+        by_idx, _ = spacing(paras, config=NOTE6_CONFIG)
         for i in (2, 3):
             self.assertEqual(expected_of(by_idx, i), (6, "PASS"))
             self.assertEqual(by_idx[i]["hierarchy"]["kind"], "note")
         self.assertEqual(expected_of(by_idx, 4), (6, "PASS"))      # 주석은 층위 판단에서 제외 → 본문은 앞 본문 기준
         self.assertEqual(expected_of(by_idx, 7), (14, "PASS"))     # □ → (주석) → □ 는 □ 사이 14
+
+    def test_note_spacing_excluded_by_default(self):
+        # 2026-10-31 사용자 결정: 주석 위 간격은 검사·수정하지 않음(wannabe 의 주석 위 0pt 를 그대로 둠)
+        paras = [P("□ 항목", 14), P("* 주석", 0), P("※ 주석", 12), P("□ 다음 항목", 14)]
+        by_idx, res = spacing(paras)
+        self.assertNotIn(1, by_idx)
+        self.assertNotIn(2, by_idx)
+        self.assertTrue(any(r["status"] == "SKIP" and set(r["target"]["paragraph_indices"]) == {1, 2}
+                            for r in res["results"] if r["rule_id"] == "PARA_SPACING"))
+        self.assertEqual(expected_of(by_idx, 3), (14, "PASS"))     # 주석은 여전히 층위 판단에서 제외
+        self.assertEqual([x for x in res["fix_plan"]["role_based_actions"] if x["op"] == "set_para_space_before"], [])
 
     def test_unmapped_markers_are_unknown(self):
         for text in ("Ⅰ. 로마 숫자", "(1) 괄호 번호", "■ 검은 사각형", "○ 원 기호"):
@@ -256,7 +274,8 @@ class RequiredCasesTest(unittest.TestCase):
         # 빈 줄로 간격을 둔 문서(sample_original): 빈 문단이 있으면 문단 위 간격은 0pt, 빈 문단은 삭제하지 않는다
         paras = [P("1. 사업 개요"), P(""), P("2. 사업 추진 계획", 0), P(""), P("□ 항목", 0), P(""), P("본문", 0), P(""), P("※ 주석", 0)]
         by_idx, res = spacing(paras)
-        for i in (2, 4, 6, 8):
+        self.assertNotIn(8, by_idx)                                # 주석 위 간격은 검사 제외
+        for i in (2, 4, 6):
             self.assertEqual(expected_of(by_idx, i), (0, "PASS"), i)
             self.assertIn("빈 문단 1개", by_idx[i]["observation"])
             self.assertIn("삭제하지 않음", by_idx[i]["observation"])
@@ -294,8 +313,8 @@ class RequiredCasesTest(unittest.TestCase):
         self.assertEqual(ins, before)
 
 
-def hanging(paragraphs, app="Hancom Office Hangul"):
-    return rule_results(paragraphs, "HANGING_INDENT", sub_item=True, app=app)
+def hanging(paragraphs, app="Hancom Office Hangul", config=WIDTH_CONFIG):
+    return rule_results(paragraphs, "HANGING_INDENT", sub_item=True, app=app, config=config)
 
 
 class HangingIndentTest(unittest.TestCase):
@@ -487,8 +506,8 @@ class FontSizeTest(unittest.TestCase):
         self.assertEqual((by_idx[2]["status"], by_idx[2]["expected"]["value"]), ("PASS", 12))
 
 
-def word_break(paragraphs, para_props):
-    return rule_results(paragraphs, "WORD_BREAK", para_props=para_props)
+def word_break(paragraphs, para_props, config=WORD_BREAK_CONFIG):
+    return rule_results(paragraphs, "WORD_BREAK", para_props=para_props, config=config)
 
 
 def _pp(pid, hangul="KEEP_WORD", latin="KEEP_WORD"):
@@ -522,8 +541,65 @@ class WordBreakTest(unittest.TestCase):
         p["line_layout"]["lines"] = [{"textpos": 0}, {"textpos": 4}, {"textpos": 17}]    # '보증보험|증권' 은 어절 중간, 17은 공백 뒤
         by_idx, _ = word_break([p], {"2": _pp(2)})
         self.assertIn("어절 중간에 줄이 나뉜 곳 1개", by_idx[0]["observation"])
-        by_idx, _ = rule_results([p], "WORD_BREAK", para_props={"2": _pp(2)}, app="Other Editor")
+        by_idx, _ = rule_results([p], "WORD_BREAK", para_props={"2": _pp(2)}, app="Other Editor",
+                                 config=WORD_BREAK_CONFIG)
         self.assertIsNone(by_idx[0].get("observation"))                # 한글이 저장한 줄 배치가 아니면 보고하지 않음
+
+    def test_disabled_by_default(self):
+        # 2026-10-31 사용자 결정: 원본 줄 나눔 기준을 그대로 둔다(검사·수정 안 함)
+        paras = [P("글자 단위 문단", para_pr_id=2), P("어절 단위 문단", para_pr_id=1)]
+        by_idx, res = word_break(paras, {"1": _pp(1, "BREAK_WORD"), "2": _pp(2)}, config=CONFIG)
+        self.assertEqual(by_idx, {})
+        rows = [r for r in res["results"] if r["rule_id"] == "WORD_BREAK"]
+        self.assertEqual([(r["status"], r["target"]["paragraph_indices"]) for r in rows], [("SKIP", [0, 1])])
+        self.assertIn("2026-10-31", rows[0]["reason"])
+        self.assertEqual([x for x in res["fix_plan"]["auto_actions"] if x["op"] == "set_para_word_break"], [])
+
+
+class WannabeRulesTest(unittest.TestCase):
+    """2026-10-31 사용자 결정(sample_original_wannabe 기준): 한 줄 문단 내어쓰기 제외, 기존 내어쓰기 존중, 본문 줄 간격 130~160% 허용."""
+
+    def _align(self, p, app="Hancom Office Hangul"):
+        out, res = hanging([p], app=app, config=CONFIG)
+        return out.get((0, "둘째 줄 정렬")), res
+
+    def test_single_line_skipped(self):
+        r, res = self._align(P("1. 추진배경", lines=1, size=16))
+        self.assertIsNone(r)
+        self.assertTrue(any(r["status"] == "SKIP" and "한 줄 문단" in r["reason"]
+                            for r in res["results"] if r["rule_id"] == "HANGING_INDENT"))
+        out, _ = hanging([P("□  두 칸 공백", lines=1)], config=CONFIG)
+        self.assertEqual(out[(0, "번호·기호 뒤 공백")]["status"], "FAIL")    # 공백 검사는 그대로
+
+    def test_single_line_checked_without_saved_layout(self):
+        p = P("□ 줄 배치 없는 문단")
+        p["line_layout"] = None
+        r, _ = self._align(p)
+        self.assertEqual(r["status"], "FAIL")                      # 줄 수를 모르면 검사
+        r, _ = self._align(P("□ 다른 프로그램", lines=1), app="Other Writer")
+        self.assertEqual(r["status"], "FAIL")                      # 한글이 저장하지 않은 줄 배치는 믿지 않음
+
+    def test_existing_hanging_kept(self):
+        r, res = self._align(P("   □ 작성자 폭", indent=-46.3, lines=3))
+        self.assertEqual(r["status"], "PASS")
+        self.assertIn("유지", r["reason"])
+        self.assertEqual([x for x in res["fix_plan"]["role_based_actions"] if x["op"] == "set_para_hanging_indent"], [])
+
+    def test_multi_line_without_hanging_fixed(self):
+        r, _ = self._align(P("□ 내어쓰기 없음", indent=0, lines=2))
+        self.assertEqual((r["status"], r["fix"]["actions"][0]["to"]), ("FAIL", -21.0))
+        r, _ = self._align(P("□ 들여쓰기", indent=10, lines=2))
+        self.assertEqual(r["status"], "FAIL")                      # 들여쓰기는 내어쓰기가 아님
+
+    def test_body_line_spacing_range(self):
+        paras = [P("□ 130 문단"), P("□ 145 문단"), P("□ 120 문단"), P("□ 170 문단"), P("※ 주석 160", role="note")]
+        for p, v in zip(paras, (130, 145, 120, 170, 160)):
+            p["para_format"].update(line_spacing_value=v, line_spacing="%d%%" % v)
+        by_idx, _ = rule_results(paras, "LINE_SPACING")
+        self.assertEqual([by_idx[i]["status"] for i in range(5)], ["PASS", "PASS", "FAIL", "FAIL", "FAIL"])
+        self.assertEqual(by_idx[2]["fix"]["actions"][0]["to"], {"type": "PERCENT", "value": 160})
+        self.assertIn("130~160%", by_idx[0]["expected"]["display"])
+        self.assertEqual(by_idx[4]["expected"]["value"]["value"], 130)    # 주석은 범위 없이 130%
 
 
 if __name__ == "__main__":
@@ -546,16 +622,23 @@ class PageBreakHeadingTest(unittest.TestCase):
                  P("4. 쪽 중간 대제목", layout=MID), P("본문", layout=MID)]
         by_idx, res = page_break(paras)
         self.assertEqual(by_idx[0]["status"], "SKIP")                                  # 첫 대제목 제외
-        for i, blank in ((3, 2), (6, 5)):
+        for i, blanks in ((3, []), (6, [5])):      # 쪽 마지막 줄 대제목 앞 빈 문단은 남기고, 쪽 맨 위 대제목 앞만 지움
             r = by_idx[i]
             self.assertEqual(r["status"], "FAIL", r["reason"])
             ops = [(a["op"], a["paragraph_index"]) for a in r["fix"]["actions"]]
-            self.assertEqual(ops, [("set_page_break", i), ("delete_empty_paragraph", blank)])
-            self.assertEqual(r["blank_paragraphs_to_delete"], [blank])
+            self.assertEqual(ops, [("set_page_break", i)] + [("delete_empty_paragraph", b) for b in blanks])
+            self.assertEqual(r["blank_paragraphs_to_delete"], blanks)
         self.assertEqual(by_idx[9]["status"], "PASS")                                  # 쪽 중간은 그대로
         plan = res["fix_plan"]["role_based_actions"]
         self.assertEqual(sorted(a["paragraphs"][0] for a in plan if a["op"] == "set_page_break"), [3, 6])
-        self.assertEqual(sorted(a["paragraphs"][0] for a in plan if a["op"] == "delete_empty_paragraph"), [2, 5])
+        self.assertEqual(sorted(a["paragraphs"][0] for a in plan if a["op"] == "delete_empty_paragraph"), [5])
+
+    def test_blank_before_page_last_heading_deleted_when_option_off(self):
+        cfg = copy.deepcopy(CONFIG)
+        cfg["rules"]["PAGE_BREAK_HEADING"]["delete_blank_only_page_first"] = False
+        paras = [P("1. 첫", layout=MID), P("본문", layout=MID), P(""), P("2. 쪽 마지막", layout=LAST), P("본문", layout=FIRST)]
+        by_idx, _ = page_break(paras, config=cfg)
+        self.assertEqual(by_idx[3]["blank_paragraphs_to_delete"], [2])
 
     def test_existing_page_break_passes_and_spacing_zero(self):
         paras = [P("1. 첫"), P("본문"), P("2. 새 쪽 대제목", 0, page_break=True, layout=FIRST), P("본문")]

@@ -301,8 +301,19 @@ class FormatHwpxTest(unittest.TestCase):
         note = next(p for p in b["paragraphs"] if p["text"].startswith("※ 자료"))
         self.assertEqual(note["char_format"]["size_pt"], 12.0)                            # 수정 후 본문 14 - 2
 
-    def test_word_break_set_to_word_unit(self):
+    def test_word_break_off_by_default(self):
+        # 2026-10-31 사용자 결정: 어절 단위 줄 나눔 규칙을 꺼서 원본 줄 나눔 기준을 그대로 둔다
         res = self._run()
+        self.assertTrue(res["ok"], res["errors"])
+        self.assertNotIn("set_para_word_break", [a["op"] for a in res["fix"]["applied"]])
+
+    def test_word_break_set_to_word_unit(self):
+        import checker
+        cfg, _ = checker.load_config()
+        cfg["rules"]["WORD_BREAK"]["enabled"] = True
+        cfg_path = self.dir / "cfg_word_break.json"
+        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+        res = format_hwpx(self.src, self.dir / "out", config_path=str(cfg_path))
         self.assertTrue(res["ok"], res["errors"])
         self.assertIn("set_para_word_break", [a["op"] for a in res["fix"]["applied"]])
         after = json.loads((self.dir / "out" / "check_after.json").read_text(encoding="utf-8"))
@@ -356,14 +367,14 @@ class PageBreakFormatTest(unittest.TestCase):
         self.assertEqual(pages[10], ("4. 마무리", 3, False, False))  # 쪽 중간
         res = format_hwpx(self.src, self.dir / "out")
         self.assertTrue(res["ok"], res["errors"])
-        self.assertEqual([d["index"] for d in res["fix"]["deleted_paragraphs"]], [3, 6])
+        self.assertEqual([d["index"] for d in res["fix"]["deleted_paragraphs"]], [6])          # '2.'(쪽 마지막 줄) 앞 빈 문단은 유지
         self.assertEqual(res["fix"]["not_applied"], [])
         after = inspect_hwpx(str(res["output"]))
         texts = [p["text"] for p in after["paragraphs"]]
-        self.assertEqual(len(texts), len(before["paragraphs"]) - 2)
+        self.assertEqual(len(texts), len(before["paragraphs"]) - 1)
         self.assertEqual([p["text"][:5] for p in after["paragraphs"] if p.get("page_break_before")], ["2. 계획", "3. 결과"])
         self.assertEqual([t for t in [p["text"] for p in before["paragraphs"]] if t], [t for t in texts if t])   # 글자 있는 문단 보존
-        self.assertEqual(texts.count(""), 1)                                                                 # '4.' 앞 빈 문단은 유지
+        self.assertEqual(texts.count(""), 2)                                                                 # '2.'·'4.' 앞 빈 문단은 유지
         chk = json.loads((self.dir / "out" / "check_after.json").read_text(encoding="utf-8"))
         st = {r["target"].get("text_excerpt", "")[:5]: r["status"] for r in chk["results"] if r["rule_id"] == "PAGE_BREAK_HEADING"}
         self.assertEqual(st, {"1. 개요": "SKIP", "2. 계획": "PASS", "3. 결과": "PASS", "4. 마무": "PASS"})

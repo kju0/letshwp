@@ -179,11 +179,16 @@ class CheckerFixtureTest(unittest.TestCase):
 
     # 6-2. 어절 단위 줄 나눔(자동 수정): 한글 저장값은 BREAK_WORD = 어절
     def test_word_break(self):
-        body = one(self.results, "WORD_BREAK", BODY1[:10])
+        skip = find(self.results, "WORD_BREAK")
+        self.assertEqual({r["status"] for r in skip}, {"SKIP"})                        # 기본 설정: 꺼짐(2026-10-31)
+        cfg = copy.deepcopy(self.config)
+        cfg["rules"]["WORD_BREAK"]["enabled"] = True
+        results = check_document(self.inspection, cfg, self.config_path)["results"]
+        body = one(results, "WORD_BREAK", BODY1[:10])
         self.assertEqual((body["status"], body["fix"]["mode"], body["current"]["value"]["breakNonLatinWord"]), ("FAIL", "auto", "KEEP_WORD"))
         self.assertEqual(body["fix"]["actions"][0]["to"], {"breakNonLatinWord": "BREAK_WORD"})
-        self.assertEqual(one(self.results, "WORD_BREAK", "2024")["status"], "PASS")        # 표 셀 paraPr 4 는 어절(BREAK_WORD)
-        self.assertEqual(one(self.results, "WORD_BREAK", "머리말 문구")["status"], "FAIL")   # 머리말 문단도 대상
+        self.assertEqual(one(results, "WORD_BREAK", "2024")["status"], "PASS")        # 표 셀 paraPr 4 는 어절(BREAK_WORD)
+        self.assertEqual(one(results, "WORD_BREAK", "머리말 문구")["status"], "FAIL")   # 머리말 문단도 대상
 
     # 7. 문단별로 다른 기준
     def test_role_dependent_standards(self):

@@ -104,6 +104,7 @@ class HangingWidthWithFontTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             build_ttf(Path(d) / "a.ttf", family="휴먼명조")
             cfg["rules"]["HANGING_INDENT"]["font_dir"] = d
+            cfg["rules"]["HANGING_INDENT"]["skip_single_line"] = False    # 한 줄 문단도 폭 계산 확인
             res = check_document(inspection([P("□ 항목", size=14), P("1. 번호", size=16), P("※ 주석", size=14)]), cfg, cp)
         rows = {r["target"]["paragraph_index"]: r for r in res["results"]
                 if r["rule_id"] == "HANGING_INDENT" and r.get("sub_item") == "둘째 줄 정렬"}
