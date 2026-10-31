@@ -225,7 +225,7 @@ class RequiredCasesTest(unittest.TestCase):
         paras = [P("", objects=["T0"]), P("입 찰 공 고", role="document_title", container="table_cell"),
                  P(""), P("1. 입찰에 부치는 사항", space_before=20)]
         by_idx, res = spacing(paras, doc_type="A", tables=tables)
-        self.assertEqual(expected_of(by_idx, 3), (20, "PASS"))
+        self.assertEqual(expected_of(by_idx, 3), (20, "PASS"))     # TYPE A 특례는 빈 문단보다 우선
         self.assertIn("TYPE A", by_idx[3]["expected"]["basis"])
         self.assertIn("빈 문단 1개", by_idx[3]["observation"])
         by_idx, _ = spacing(copy.deepcopy(paras), tables=tables)   # 유형 미지정이면 특례를 추측하지 않음
@@ -251,12 +251,16 @@ class RequiredCasesTest(unittest.TestCase):
         self.assertEqual(by_idx2[1]["status"], "PASS")
         self.assertEqual([x for x in res2["fix_plan"]["role_based_actions"] if x["op"] == "set_para_space_before"], [])
 
-    def test_existing_blank_paragraph_is_kept_and_reported(self):
-        paras = [P("1. 사업 개요"), P(""), P("2. 사업 추진 계획", 20)]
+    def test_blank_paragraph_before_means_zero_spacing(self):
+        # 빈 줄로 간격을 둔 문서(sample_original): 빈 문단이 있으면 문단 위 간격은 0pt, 빈 문단은 삭제하지 않는다
+        paras = [P("1. 사업 개요"), P(""), P("2. 사업 추진 계획", 0), P(""), P("□ 항목", 0), P(""), P("본문", 0), P(""), P("※ 주석", 0)]
         by_idx, res = spacing(paras)
-        self.assertEqual(by_idx[2]["status"], "PASS")
-        self.assertIn("빈 문단 1개", by_idx[2]["observation"])
-        self.assertIn("삭제하지 않음", by_idx[2]["observation"])
+        for i in (2, 4, 6, 8):
+            self.assertEqual(expected_of(by_idx, i), (0, "PASS"), i)
+            self.assertIn("빈 문단 1개", by_idx[i]["observation"])
+            self.assertIn("삭제하지 않음", by_idx[i]["observation"])
+        by_idx, _ = spacing([P("1. 사업 개요"), P(""), P("2. 사업 추진 계획", 20)])
+        self.assertEqual((by_idx[2]["status"], by_idx[2]["fix"]["actions"][0]["to"]), ("FAIL", 0))
 
     def test_previous_space_after_reported(self):
         by_idx, _ = spacing([P("1. 개요", space_after=10), P("2. 계획", 20)])

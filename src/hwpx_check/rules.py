@@ -809,14 +809,19 @@ def rule_para_spacing(doc):
                                       "previous_paragraph", "previous_structural_paragraph", "blank_paragraphs_before")}
         observations = []
         if h.get("blank_paragraphs_before"):
-            observations.append("앞에 빈 문단 %d개 - 시각적 중복 간격 가능(빈 문단은 삭제하지 않음)" % h["blank_paragraphs_before"])
+            observations.append("앞에 빈 문단 %d개 - 빈 줄이 간격 역할(빈 문단은 삭제하지 않음)" % h["blank_paragraphs_before"])
         prev = doc.paragraphs[h["previous_paragraph"]] if h.get("previous_paragraph") is not None else None
         prev_after = ((prev or {}).get("para_format") or {}).get("space_after_pt")
         if prev_after:
             observations.append("직전 문단 #%d 의 문단 아래 간격 %gpt 가 별도로 있음" % (prev["index"], prev_after))
 
         expected_pt, basis, allowed = None, None, ()
-        if special and special["paragraph"] == p["index"]:
+        blanks = h.get("blank_paragraphs_before") or 0
+        if blanks and kind in ("item", "bullet", "note", "body") and not (special and special["paragraph"] == p["index"]):
+            # 빈 문단(빈 줄)으로 간격을 둔 문단: 빈 줄이 간격 역할을 하므로 문단 위 간격은 0pt (sample_original 기준, 2026-10-31)
+            expected_pt = 0
+            basis = "앞에 빈 문단 %d개가 간격 역할 → 문단 위 간격 0pt (빈 문단은 삭제하지 않음)" % blanks
+        elif special and special["paragraph"] == p["index"]:
             if special["status"] != "applied":
                 results.append(make_result(doc, "PARA_SPACING", UNKNOWN, "TYPE A/B 특례 대상 여부를 확정할 수 없음",
                                            target_of(p), role_of(p), current, unknown_reason=special["reason"],
