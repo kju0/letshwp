@@ -3,8 +3,9 @@
 하나라도 실패하면 수정본을 정상 결과로 내보내지 않는다(CLAUDE.md 절대 원칙).
 """
 
+import re
 import zipfile
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 
 PASS, FAIL = "PASS", "FAIL"
 # 서식 수정으로 바뀔 수 있는 줄 배치 캐시 외에는 문단 기록이 같아야 한다
@@ -22,8 +23,37 @@ def _zip_entries(path):
         return [(i.filename, i.compress_type) for i in z.infolist()], {i.filename: z.read(i.filename) for i in z.infolist()}
 
 
+class Remap:
+    """삭제된 빈 문단(쪽 나눔 대제목 앞)을 고려해 수정 전 문단 index·경로를 수정 후 값으로 옮긴다."""
+
+    def __init__(self, before_paragraphs, deleted):
+        self.deleted = {d["index"] for d in deleted or []}
+        self.index = {}
+        k = 0
+        for p in before_paragraphs:
+            if p["index"] in self.deleted:
+                continue
+            self.index[p["index"]] = k
+            k += 1
+        self.ordinals = defaultdict(list)   # 구역 -> 삭제된 최상위 문단 순번
+        for d in deleted or []:
+            m = re.match(r"sec(\d+)/p(\d+)$", d["path"] or "")
+            if m:
+                self.ordinals[int(m.group(1))].append(int(m.group(2)))
+
+    def path(self, path):
+        m = re.match(r"sec(\d+)/p(\d+)(.*)$", path or "")
+        if not m:
+            return path
+        sec, n, rest = int(m.group(1)), int(m.group(2)), m.group(3)
+        n -= sum(1 for x in self.ordinals.get(sec, []) if x < n)
+        return "sec%d/p%d%s" % (sec, n, rest)
+
+
 def verify(src_path, out_path, before_ins, after_ins, before_check, after_check, fix):
     checks = []
+    deleted = fix.get("deleted_paragraphs") or []
+    rm = Remap(before_ins["paragraphs"], deleted)
 
     # 1) 패키지: 엔트리 목록·순서·압축 방식 동일, 바꾼 파트 외에는 바이트 동일
     (e1, d1), (e2, d2) = _zip_entries(src_path), _zip_entries(out_path)
@@ -41,18 +71,39 @@ def verify(src_path, out_path, before_ins, after_ins, before_check, after_check,
     v = after_ins.get("verification") or {}
     checks.append(_check("수정본 Inspector 검증 통과", bool(v.get("all_ok")), "verification.all_ok=%s" % v.get("all_ok")))
 
-    # 3) 문단 수·순서·텍스트·개체 동일
-    p1, p2 = before_ins["paragraphs"], after_ins["paragraphs"]
+    # 3) 문단 수·순서·텍스트·개체 동일 (허용된 빈 문단 삭제만 제외)
+    p1_all, p2 = before_ins["paragraphs"], after_ins["paragraphs"]
+    p1 = [a for a in p1_all if a["index"] not in rm.deleted]
+    pairs = list(zip(p1, p2))
     diffs = []
     if len(p1) != len(p2):
-        diffs.append("문단 수 %d → %d" % (len(p1), len(p2)))
+        diffs.append("문단 수 %d(삭제 %d 제외) → %d" % (len(p1_all), len(rm.deleted), len(p2)))
     else:
-        for a, b in zip(p1, p2):
+        for a, b in pairs:
             for k in PARA_STRUCT_KEYS:
-                if a.get(k) != b.get(k):
+                av = rm.path(a.get(k)) if k == "path" else a.get(k)
+                if av != b.get(k):
                     diffs.append("문단 #%d %s" % (a["index"], k))
     checks.append(_check("문단 수·순서·텍스트·개체 동일", not diffs,
-                         "문단 %d개 일치" % len(p1) if not diffs else "; ".join(diffs[:10])))
+                         ("문단 %d개 일치" % len(p1) + (" (빈 문단 %d개 삭제 제외)" % len(rm.deleted) if rm.deleted else ""))
+                         if not diffs else "; ".join(diffs[:10])))
+
+    # 3-2) 삭제한 문단은 쪽 나눔을 넣은 대제목 바로 앞의 빈 문단뿐 (절대 원칙 예외 범위)
+    by_index = {a["index"]: a for a in p1_all}
+    break_targets = {pi for a in fix["applied"] if a["op"] == "set_page_break" for pi in a.get("paragraphs") or []}
+    d_bad = []
+    for d in deleted:
+        a = by_index.get(d["index"])
+        if a is None or not a.get("is_empty") or a.get("objects") or a.get("controls"):
+            d_bad.append("#%d 빈 문단 아님" % d["index"])
+            continue
+        nxt = d["index"] + 1
+        while nxt in rm.deleted:
+            nxt += 1
+        if nxt not in break_targets:
+            d_bad.append("#%d 뒤가 쪽 나눔 대제목 아님" % d["index"])
+    checks.append(_check("삭제한 문단은 쪽 나눔 대제목 바로 앞의 빈 문단뿐", not d_bad,
+                         "삭제 %d개" % len(deleted) if not d_bad else "; ".join(d_bad)))
 
     # 4) 표 구조(행·열·셀 병합·셀 텍스트), 그림 동일
     t_diffs = []
@@ -61,7 +112,8 @@ def verify(src_path, out_path, before_ins, after_ins, before_check, after_check,
         t_diffs.append("표 수 %d → %d" % (len(t1), len(t2)))
     else:
         for a, b in zip(t1, t2):
-            if any(a.get(k) != b.get(k) for k in TABLE_KEYS):
+            if any((rm.path(a.get(k)) if k == "path" else rm.index.get(a.get(k)) if k == "anchor_paragraph" else a.get(k)) != b.get(k)
+                   for k in TABLE_KEYS):
                 t_diffs.append("표 %s 속성" % a.get("id"))
             ca = [tuple(c.get(k) for k in CELL_KEYS) for c in a.get("cells") or []]
             cb = [tuple(c.get(k) for k in CELL_KEYS) for c in b.get("cells") or []]
@@ -78,7 +130,7 @@ def verify(src_path, out_path, before_ins, after_ins, before_check, after_check,
     targets = {pi for c in fix["clones"] for pi in c.get("paragraphs") or []}
     f_diffs = []
     if len(p1) == len(p2):
-        for a, b in zip(p1, p2):
+        for a, b in pairs:
             if a["index"] in targets:
                 continue
             if a.get("para_format") != b.get("para_format") or a.get("runs") != b.get("runs") \
@@ -101,14 +153,15 @@ def verify(src_path, out_path, before_ins, after_ins, before_check, after_check,
                          "대상 셀 %d개 외 변화 없음" % len(cell_targets) if not c_diffs else "변화: %s" % ", ".join(c_diffs[:20])))
 
     # 6) 재검사: 적용한 수정의 FAIL 이 PASS 로 바뀌었고, 원래 PASS 였던 항목이 FAIL 이 되지 않음
-    def keyed(check):
+    def keyed(check, remap=False):
         out = {}
         for r in check["results"]:
             t = r.get("target") or {}
             if t.get("path") or t.get("type") == "section":
-                out[(r["rule_id"], t.get("path"), t.get("section_index"))] = r
+                path = rm.path(t.get("path")) if remap else t.get("path")
+                out[(r["rule_id"], path, t.get("section_index"))] = r
         return out
-    kb, ka = keyed(before_check), keyed(after_check)
+    kb, ka = keyed(before_check, remap=True), keyed(after_check)
     by_id = {r["id"]: r for r in before_check["results"]}
     applied_results = {rid for a in fix["applied"] for rid in a.get("result_ids") or []}
     blocked_results = {rid for a in fix["not_applied"] for rid in a.get("result_ids") or []}
@@ -118,7 +171,9 @@ def verify(src_path, out_path, before_ins, after_ins, before_check, after_check,
         if not r:
             continue
         t = r.get("target") or {}
-        after = ka.get((r["rule_id"], t.get("path"), t.get("section_index")))
+        if t.get("paragraph_index") in rm.deleted:
+            continue   # 삭제된 빈 문단을 대상으로 한 결과(삭제 동작)는 재검사 대상이 없다
+        after = ka.get((r["rule_id"], rm.path(t.get("path")), t.get("section_index")))
         if after is None or after["status"] != PASS:
             still_fail.append("%s(%s → %s)" % (rid, r["status"], after["status"] if after else "없음"))
     checks.append(_check("적용한 수정 항목이 재검사에서 적합(PASS)", not still_fail,

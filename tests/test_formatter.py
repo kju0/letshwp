@@ -19,7 +19,8 @@ from inspector import inspect_hwpx  # noqa: E402
 from hwpx_analysis.package import sha256_of  # noqa: E402
 from hwpx_format.xmlpatch import scan, set_attr_edit, apply_edits, XmlPatchError  # noqa: E402
 from hwpx_format import ops  # noqa: E402
-from hwpx_fixture import build_fixture, SECTION  # noqa: E402
+from hwpx_fixture import build_fixture, build_pages_fixture, SECTION  # noqa: E402
+from hwpx_format.verify import Remap  # noqa: E402
 from run_fix import run_fix, main as run_fix_main  # noqa: E402
 
 PARA_PR = (b'<hh:paraPr id="3"><hh:align horizontal="CENTER" vertical="BASELINE"/><hp:switch>'
@@ -332,6 +333,71 @@ class FormatHwpxTest(unittest.TestCase):
         for s in ("# 서식 수정 보고서", "✅", "## 1. 한눈에 보기", "## 2. 수정한 내용", "### 장평", "### 표 양단선",
                   "## 3. 검증 결과", "## 4. 수정하지 않은 항목", "| 위치 | 내용 | 변경 전 | 변경 후 |"):
             self.assertIn(s, md)
+
+
+class PageBreakFormatTest(unittest.TestCase):
+    """대제목 쪽 나눔 + 바로 앞 빈 문단 삭제(절대 원칙 예외)의 전체 흐름과 검증."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.src = self.dir / "pages.hwpx"
+        build_pages_fixture(self.src)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_page_break_and_blank_deletion(self):
+        before = inspect_hwpx(str(self.src))
+        pages = [(p["text"][:6], (p.get("line_layout") or {}).get("page"), (p.get("line_layout") or {}).get("page_first"),
+                  (p.get("line_layout") or {}).get("page_last")) for p in before["paragraphs"]]
+        self.assertEqual(pages[4], ("2. 계획", 1, False, True))      # 1쪽 마지막 줄
+        self.assertEqual(pages[7], ("3. 결과", 3, True, False))      # 3쪽 첫 문단
+        self.assertEqual(pages[10], ("4. 마무리", 3, False, False))  # 쪽 중간
+        res = format_hwpx(self.src, self.dir / "out")
+        self.assertTrue(res["ok"], res["errors"])
+        self.assertEqual([d["index"] for d in res["fix"]["deleted_paragraphs"]], [3, 6])
+        self.assertEqual(res["fix"]["not_applied"], [])
+        after = inspect_hwpx(str(res["output"]))
+        texts = [p["text"] for p in after["paragraphs"]]
+        self.assertEqual(len(texts), len(before["paragraphs"]) - 2)
+        self.assertEqual([p["text"][:5] for p in after["paragraphs"] if p.get("page_break_before")], ["2. 계획", "3. 결과"])
+        self.assertEqual([t for t in [p["text"] for p in before["paragraphs"]] if t], [t for t in texts if t])   # 글자 있는 문단 보존
+        self.assertEqual(texts.count(""), 1)                                                                 # '4.' 앞 빈 문단은 유지
+        chk = json.loads((self.dir / "out" / "check_after.json").read_text(encoding="utf-8"))
+        st = {r["target"].get("text_excerpt", "")[:5]: r["status"] for r in chk["results"] if r["rule_id"] == "PAGE_BREAK_HEADING"}
+        self.assertEqual(st, {"1. 개요": "SKIP", "2. 계획": "PASS", "3. 결과": "PASS", "4. 마무": "PASS"})
+        self.assertEqual(chk["summary"]["FAIL"], 0)
+        names = [c["name"] for c in res["verification"]["checks"]]
+        self.assertIn("삭제한 문단은 쪽 나눔 대제목 바로 앞의 빈 문단뿐", names)
+        # 2회 변환: 더 지울 것도 넣을 것도 없다
+        res2 = format_hwpx(Path(res["output"]), self.dir / "out2")
+        self.assertTrue(res2["ok"], res2["errors"])
+        self.assertEqual(res2["fix"]["deleted_paragraphs"], [])
+        self.assertEqual([a["op"] for a in res2["fix"]["applied"] if a["op"] in ("set_page_break", "delete_empty_paragraph")], [])
+
+    def test_delete_refuses_non_empty_paragraph(self):
+        from hwpx_format.apply import op_delete_empty_paragraph
+        from hwpx_format.ops import OpNotApplicable
+        for xml in ('<hp:p id="0"><hp:run charPrIDRef="2"><hp:t>글자</hp:t></hp:run></hp:p>'.encode("utf-8"),
+                    b'<hp:p id="0"><hp:run charPrIDRef="2"><hp:tbl rowCnt="1"/></hp:run></hp:p>',
+                    b'<hp:p id="0"><hp:run charPrIDRef="2"><hp:ctrl><hp:colPr/></hp:ctrl></hp:run></hp:p>'):
+            root, _ = scan(xml)
+            with self.assertRaises(OpNotApplicable):
+                op_delete_empty_paragraph(xml, root, {})
+        xml = b'<r><hp:p id="0"><hp:run charPrIDRef="2"></hp:run></hp:p><hp:p id="0"><hp:run charPrIDRef="2"><hp:t></hp:t></hp:run></hp:p></r>'
+        root, _ = scan(xml)
+        edits = [e for p_el in root.kids("p") for e in op_delete_empty_paragraph(xml, p_el, {})]
+        self.assertEqual(apply_edits(xml, edits), b"<r></r>")
+
+    def test_remap_paths_and_indices(self):
+        paras = [{"index": i} for i in range(6)]
+        rm = Remap(paras, [{"index": 2, "path": "sec0/p2", "section": 0}, {"index": 4, "path": "sec0/p4", "section": 0}])
+        self.assertEqual(rm.index, {0: 0, 1: 1, 3: 2, 5: 3})
+        self.assertEqual(rm.path("sec0/p5"), "sec0/p3")
+        self.assertEqual(rm.path("sec0/p3/tbl0/r0c0/p1"), "sec0/p2/tbl0/r0c0/p1")
+        self.assertEqual(rm.path("sec0/p1"), "sec0/p1")
+        self.assertEqual(rm.path("sec1/p5"), "sec1/p5")
 
 
 class RunFixTest(unittest.TestCase):

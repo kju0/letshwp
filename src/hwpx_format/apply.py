@@ -6,6 +6,7 @@
 - 같은 정의를 쓰는 대상 문단이라도 적용할 op 묶음이 다르면 묶음별로 따로 복제한다.
 - 표 셀 테두리(borderFill)도 같은 방식으로 복제해 대상 셀(hp:tc)만 새 id 를 참조하게 한다.
 - 구역 설정(쪽 여백 등)은 해당 구역의 hp:pagePr 값을 직접 바꾼다.
+- 대제목 쪽 나눔은 hp:p@pageBreak 만 바꾼다. 그 바로 앞 빈 문단 삭제는 문단 구조를 바꾸는 유일한 예외(검증에서 이 경우만 허용).
 - XML 은 바이트 단위로 필요한 속성만 바꾼다(xmlpatch). 텍스트·문단·표·그림 요소는 건드리지 않는다.
 """
 
@@ -29,6 +30,31 @@ TARGET_UNIT = {"charPr": "paragraph", "paraPr": "paragraph", "borderFill": "cell
 
 class ApplyError(RuntimeError):
     pass
+
+
+# --- 문단(hp:p) 자체에 적용하는 동작: 함수(구역 바이트, hp:p Elem, action) -> 편집 목록 ---
+def op_set_page_break(data, p_el, a):
+    return [set_attr_edit(data, p_el, "pageBreak", "1" if a.get("to", True) in (True, "1", 1) else "0")]
+
+
+def op_delete_empty_paragraph(data, p_el, a):
+    """빈 문단 삭제 - 절대 원칙의 유일한 예외. 텍스트·개체·컨트롤이 하나라도 있으면 적용하지 않는다."""
+    for local in ("tbl", "pic", "ctrl", "secPr", "container", "line", "rect", "ellipse", "arc", "polygon", "curve",
+                  "connectLine", "textart", "ole", "equation", "video", "chart", "fieldBegin", "fieldEnd", "footNote", "endNote"):
+        if list(p_el.iter(local)):
+            raise OpNotApplicable("빈 문단이 아님(hp:%s 포함) - 삭제하지 않음" % local)
+    for t in p_el.iter("t"):
+        if data[t.stag_end:t.end].strip() not in (b"", b"</hp:t>") and b"<" not in data[t.stag_end:t.end].strip()[:1]:
+            raise OpNotApplicable("빈 문단이 아님(글자 있음) - 삭제하지 않음")
+        inner = data[t.stag_end:t.end]
+        close = inner.rfind(b"</")
+        text = inner[:close] if close >= 0 else inner
+        if text.strip():
+            raise OpNotApplicable("빈 문단이 아님(글자 있음) - 삭제하지 않음")
+    return [(p_el.start, p_el.end, b"")]
+
+
+PARAGRAPH_OPS = {"set_page_break": op_set_page_break, "delete_empty_paragraph": op_delete_empty_paragraph}
 
 
 def select_actions(check):
@@ -114,7 +140,7 @@ def apply_fix_plan(src_path, out_path, inspection, check):
 
     applied, not_applied = [], []
     # 1) 각 op 를 원래 정의에 시험 적용해 적용 가능 여부를 먼저 가린다
-    def_actions, sec_actions = [], []
+    def_actions, sec_actions, para_actions = [], [], []
     for n, a in enumerate(actions):
         a = dict(a, action_no=n + 1)
         op = a["op"]
@@ -132,6 +158,10 @@ def apply_fix_plan(src_path, out_path, inspection, check):
                 def_actions.append((kind, did, a))
             elif op in SECTION_OPS:
                 sec_actions.append(a)
+            elif op in PARAGRAPH_OPS:
+                if not a.get("paragraphs"):
+                    raise OpNotApplicable("대상 문단이 지정되지 않음")
+                para_actions.append(a)
             else:
                 raise OpNotApplicable("지원하지 않는 수정 동작: %s" % op)
         except (OpNotApplicable, XmlPatchError) as e:
@@ -268,6 +298,18 @@ def apply_fix_plan(src_path, out_path, inspection, check):
         except (OpNotApplicable, XmlPatchError) as e:
             not_applied.append(dict(a, reason=str(e)))
 
+    deleted = []
+    for a in para_actions:
+        try:
+            for pi in a["paragraphs"]:
+                si, part, p_el = para_elem(pi)
+                sec_edit_lists[si].extend(PARAGRAPH_OPS[a["op"]](data[part], p_el, a))
+                if a["op"] == "delete_empty_paragraph":
+                    deleted.append({"index": pi, "path": paragraphs[pi]["path"], "section": si})
+            applied.append(dict(a))
+        except (OpNotApplicable, XmlPatchError, ApplyError) as e:
+            not_applied.append(dict(a, reason=str(e)))
+
     for si, edits in sec_edit_lists.items():
         part = sections[si][0]
         new_data[part] = apply_edits(data[part], _dedupe(edits))
@@ -282,6 +324,7 @@ def apply_fix_plan(src_path, out_path, inspection, check):
         ("applied", applied),
         ("not_applied", not_applied),
         ("clones", clones),
+        ("deleted_paragraphs", deleted),
         ("changed_parts", sorted(k for k in new_data if new_data[k] != data[k])),
     ])
 

@@ -254,3 +254,47 @@ def build_fixture(path):
         z.writestr("META-INF/container.xml", CONTAINER, compress_type=zipfile.ZIP_DEFLATED)
         z.writestr("Contents/content.hpf", CONTENT_HPF, compress_type=zipfile.ZIP_DEFLATED)
     return path
+
+
+# ---------------------------------------------------------------------------
+# 쪽 배치(linesegarray vertpos)가 있는 문서: 대제목 쪽 나눔 규칙 테스트용
+#   p0 제목(secPr)  p1 '1. 개요'  p2 본문  p3 빈  p4 '2. 계획'(1쪽 마지막 줄)  p5 본문(2쪽 첫)  p6 빈(2쪽 끝)
+#   p7 '3. 결과'(3쪽 첫)  p8 본문  p9 빈  p10 '4. 마무리'(쪽 중간)  p11 본문
+# ---------------------------------------------------------------------------
+def _ls(vertpos, size=1400):
+    return ('<hp:linesegarray><hp:lineseg textpos="0" vertpos="%d" vertsize="%d" textheight="%d" baseline="%d" '
+            'spacing="840" horzpos="0" horzsize="48188" flags="393216"/></hp:linesegarray>' % (vertpos, size, size, int(size * 0.85)))
+
+
+def _pl(para, char, text, vertpos):
+    inner = ('<hp:run charPrIDRef="%d">%s</hp:run>' % (char, _t(text) if text else "")) + _ls(vertpos)
+    return _p(para, char, inner)
+
+
+PAGES_PARAGRAPHS = [
+    ("보고서 제목", 0, 0, 1), ("1. 개요", 1, 0, 3000), ("개요 설명 본문이다.", 2, 0, 6000), ("", 2, 0, 64000),
+    ("2. 계획", 1, 0, 67000), ("계획 설명 본문이다.", 2, 0, 0), ("", 2, 0, 66000),
+    ("3. 결과", 1, 0, 0), ("결과 설명 본문이다.", 2, 0, 3000), ("", 2, 0, 6000),
+    ("4. 마무리", 1, 0, 9000), ("마무리 본문이다.", 2, 0, 12000),
+]
+
+
+def build_pages_fixture(path):
+    paras = []
+    for i, (text, char, para, v) in enumerate(PAGES_PARAGRAPHS):
+        if i == 0:
+            paras.append(_p(1, 0, '<hp:run charPrIDRef="0">%s</hp:run><hp:run charPrIDRef="0">%s</hp:run>%s' % (SEC_PR, _t(text), _ls(v))))
+        else:
+            paras.append(_pl(para, char, text, v))
+    section = XML_HEAD + '<hs:sec %s>%s</hs:sec>' % (NS_DECL, "".join(paras))
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr(zipfile.ZipInfo("mimetype"), "application/hwp+zip", compress_type=zipfile.ZIP_STORED)
+        z.writestr("version.xml", VERSION.replace("Synthetic Fixture", "Hancom Office Hangul"), compress_type=zipfile.ZIP_DEFLATED)
+        z.writestr("Contents/header.xml", HEADER, compress_type=zipfile.ZIP_DEFLATED)
+        z.writestr("Contents/section0.xml", section, compress_type=zipfile.ZIP_DEFLATED)
+        z.writestr("settings.xml", XML_HEAD + '<ha:HWPApplicationSetting xmlns:ha="http://www.hancom.co.kr/hwpml/2011/app"/>',
+                   compress_type=zipfile.ZIP_DEFLATED)
+        z.writestr("META-INF/container.xml", CONTAINER, compress_type=zipfile.ZIP_DEFLATED)
+        z.writestr("Contents/content.hpf", CONTENT_HPF.replace(
+            '<opf:item id="image1" href="BinData/image1.png" media-type="image/png" isEmbeded="1"/>', ""), compress_type=zipfile.ZIP_DEFLATED)
+    return path
