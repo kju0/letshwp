@@ -47,6 +47,15 @@
       "header_mm": 10.0,
       "footer_mm": 10.0
     },
+    "PAGE_NUMBER": {
+      "name": "쪽 번호",
+      "spec_mode": "자동 수정",
+      "spec_text": "쪽 번호를 아래 가운데에 '- 1 -' 형식(숫자, 양옆 '-')으로 넣는다. 없으면 추가하고, 다른 양식이 이미 있으면 바꾸지 않는다 (2026-10-31 사용자 결정, sample_original_wannabe 기준)",
+      "pos": "BOTTOM_CENTER",
+      "format": "DIGIT",
+      "side_char": "-",
+      "_comment": "쪽 번호 컨트롤(hp:ctrl/hp:pageNum) 추가는 구조 불변 원칙의 예외(CLAUDE.md). 첫 구역 첫 문단의 구역 설정 run 끝에 넣는다(wannabe 와 같은 위치)."
+    },
     "WORD_BREAK": {
       "name": "어절 단위 줄 나눔",
       "spec_mode": "자동 수정",
@@ -231,8 +240,8 @@
     },
     "ITEM_NUMBER": {
       "name": "항목 번호",
-      "spec_mode": "검사만",
-      "spec_text": "1. → 가. → 1) → 가) → ① → ㉮",
+      "spec_mode": "자동 수정",
+      "spec_text": "1. → 가. → 1) → 가) → ① → ㉮. 같은 단계의 번호는 1(가)부터 순서대로, 상위 단계가 바뀌면 다시 1(가)부터 (2026-10-31 사용자 결정: 번호 문자만 교정)",
       "allowed_kinds": [
         "digit_dot",
         "hangul_dot",
@@ -252,18 +261,20 @@
         "chapter": "제1장",
         "paren_digit": "(1)",
         "paren_hangul": "(가)"
-      }
+      },
+      "_comment": "번호 문자 교정은 '텍스트 불변' 원칙의 예외(CLAUDE.md). 본문 최상위의 텍스트 번호 항목만 대상. 표준 체계 밖 표기(Ⅰ. (1) 등)는 검사만."
     },
     "ITEM_BULLET": {
       "name": "항목 기호",
-      "spec_mode": "검사만",
-      "spec_text": "□ → ㅇ → - → ․",
+      "spec_mode": "자동 수정",
+      "spec_text": "□ → ㅇ → - → ․ 층위 순서. 첫 기호는 □, 아래 층위로 내려갈 때 한 단계씩(건너뛰면 다음 층위 기호로 교정) (2026-10-31 사용자 결정: 기호 문자만 교정)",
       "allowed": [
         "□",
         "ㅇ",
         "-",
         "․"
-      ]
+      ],
+      "_comment": "기호 문자 교정은 '텍스트 불변' 원칙의 예외(CLAUDE.md). 본문 최상위의 표준 기호 항목만 대상. 표준 밖 기호(■ ○ 영문 o 등)는 검사만."
     },
     "DATE_FORMAT": {
       "name": "날짜 표기",

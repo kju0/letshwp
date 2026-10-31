@@ -76,6 +76,8 @@ class Doc:
         # FONT_SIZE 규칙이 채우는 '수정 후 글자 크기' (문단 index -> {charPr id: pt}).
         # 내어쓰기 폭 추정은 글자 크기가 바뀔 문단에서 수정 후 크기로 계산해야 하므로 RULES 순서상 FONT_SIZE 가 먼저 돈다.
         self.font_size_targets = {}
+        # ITEM_NUMBER/ITEM_BULLET 규칙이 채우는 '교정 후 번호·기호' (문단 index -> (현재, 교정)). HANGING_INDENT 가 교정 후 폭으로 계산
+        self.marker_targets = {}
         self._cover = None
         # 내어쓰기 폭 계산용 글꼴 폭 표: 글꼴 폴더(설정 HANGING_INDENT.font_dir > 환경 변수 LETSHWP_FONT_DIR > <저장소>/fonts)
         hi = config["rules"].get("HANGING_INDENT") or {}
@@ -411,6 +413,38 @@ def rule_header_footer_margin(doc):
                                    "%s ≠ 표준" % ", ".join("%s %gmm(표준 %gmm)" % (label[k], v, std[k]) for k, v in bad.items()),
                                    target, current=current, expected=expected,
                                    fix_actions=_margin_actions(sec, bad, std, list(bad))))
+    return out
+
+
+def rule_page_number(doc):
+    """쪽 번호(2026-10-31 사용자 결정): 아래 가운데 '- 1 -' 형식. 없으면 추가, 다른 양식이 있으면 바꾸지 않는다."""
+    rc = doc.rule_cfg("PAGE_NUMBER")
+    want = {"pos": rc["pos"], "format": rc["format"], "side_char": rc["side_char"]}
+    out = []
+    for sec in doc.sections:
+        target = {"type": "section", "section_index": sec["index"], "path": "sec%d/pageNum" % sec["index"]}
+        expected = {"value": want, "display": "아래 가운데, 숫자, 양옆 '%s' ('%s 1 %s')" % (rc["side_char"], rc["side_char"], rc["side_char"]),
+                    "basis": rc["spec_text"]}
+        pns = sec.get("page_numbers") or []
+        if not pns:
+            first = next((p for p in doc.paragraphs if p.get("section") == sec["index"] and p["path"] == "sec%d/p0" % sec["index"]), None)
+            out.append(make_result(doc, "PAGE_NUMBER", FAIL, "쪽 번호 컨트롤(hp:pageNum)이 없음", target,
+                                   current={"value": None, "display": "쪽 번호 없음", "source": VALUE_SOURCE + " - hp:ctrl/hp:pageNum"},
+                                   expected=expected,
+                                   fix_actions=[{"op": "add_page_number", "section_index": sec["index"], "to": want,
+                                                 "paragraph_index": first["index"] if first else None,
+                                                 "xml": "Contents/section%d.xml 첫 문단의 구역 설정 run 끝에 <hp:ctrl><hp:pageNum/></hp:ctrl> 추가" % sec["index"],
+                                                 "note": "구조 불변 원칙의 예외: 쪽 번호 컨트롤 하나만 추가(글자·문단은 그대로)"}]))
+            continue
+        pn = pns[0]
+        current = {"value": pn, "display": "%s, %s, 양옆 '%s'" % (pn.get("pos"), pn.get("format"), pn.get("side_char")),
+                   "source": VALUE_SOURCE + " - hp:ctrl/hp:pageNum"}
+        if all(pn.get(k) == v for k, v in want.items()):
+            out.append(make_result(doc, "PAGE_NUMBER", PASS, "쪽 번호가 표준 양식과 일치", target, current=current, expected=expected))
+        else:
+            out.append(make_result(doc, "PAGE_NUMBER", UNKNOWN, "다른 양식의 쪽 번호가 이미 있음 - 기존 컨트롤은 바꾸지 않음", target,
+                                   current=current, expected=expected, unknown_reason="기존 쪽 번호 양식 변경은 범위 밖(추가만 지원)",
+                                   needed_info="기존 쪽 번호를 바꿀지 결정"))
     return out
 
 
@@ -958,7 +992,7 @@ def _width_rule_text(rc):
         we.get("full_em", 1.0), we.get("half_em", 0.5))
 
 
-def estimate_prefix_width(doc, p, n):
+def estimate_prefix_width(doc, p, n, text=None):
     """문단 앞 n 글자(앞 공백 + 번호·기호 + 뒤 공백)의 폭(pt)을 계산한다.
     글자마다 자기 run 의 글자 모양(글꼴·크기·장평·자간)과 언어 슬롯을 쓴다.
     폭 = 글꼴 파일의 글자 폭(em) × 크기 × 장평/100 + 크기 × 자간/100 (HWP 자간은 글자 크기 대비 %).
@@ -972,10 +1006,16 @@ def estimate_prefix_width(doc, p, n):
     std_ratio = doc.rule_cfg("CHAR_RATIO").get("value")
     std_spacing = doc.rule_cfg("CHAR_SPACING").get("value")
     size_targets = doc.font_size_targets.get(p["index"]) or {}
-    text = p.get("text") or ""
+    orig_text = p.get("text") or ""
+    text = orig_text if text is None else text
     owner = []
     for run in p.get("runs") or []:
         owner.extend([run.get("char_pr_id")] * (run.get("chars") or 0))
+    if text != orig_text and owner:
+        # 번호·기호 교정으로 글자 수가 달라지면 앞 공백 뒤 글자들은 번호·기호 run 의 글자 모양을 따른다고 본다
+        lead = len(text) - len(text.lstrip())
+        if lead < len(owner):
+            owner = owner[:lead] + [owner[lead]] * (len(text) - lead)
     if len(owner) < n:
         return None, "run 별 글자 수 정보가 문단 텍스트와 맞지 않음"
     total, parts, approx = 0.0, [], []
@@ -1024,6 +1064,11 @@ def rule_hanging_indent(doc):
         marker = m["marker"] if m else detect_bullet(p)
         if not marker:
             marker = note_marker_of(text, note_markers)   # '*', '※' 주석 기호도 내어쓰기 대상(요구사항 12)
+        mt = doc.marker_targets.get(p["index"])
+        if mt and marker == mt[0]:
+            # 번호·기호가 교정될 예정이면 교정 후 문자로 폭을 계산한다(Formatter 가 함께 바꾸므로)
+            marker = mt[1]
+            text = text.replace(mt[0], mt[1], 1)
         an = p.get("auto_numbering") or {}
         auto = not marker and an.get("type") in ("OUTLINE", "NUMBER", "BULLET")
         if not marker and not auto:
@@ -1076,7 +1121,7 @@ def rule_hanging_indent(doc):
         prefix = text[: len(text) - len(s)] + marker
         s2 = s[len(marker):]
         prefix += s2[: len(s2) - len(s2.lstrip(" \t\u3000\u00a0\u2007"))]
-        est, why = estimate_prefix_width(doc, p, len(prefix))
+        est, why = estimate_prefix_width(doc, p, len(prefix), text=text)
         if indent is None or est is None:
             results.append(make_result(doc, "HANGING_INDENT", UNKNOWN,
                                        "문단 들여쓰기 값을 추출하지 못함" if indent is None else "번호·기호 부분의 폭을 추정할 수 없음",
@@ -1306,13 +1351,52 @@ NUMBER_SKIP_ROLES = {"heading_1": "제목 번호", "heading_2": "제목 번호",
                      "document_title": "문서 제목"}
 
 
+HANGUL_SEQ = "가나다라마바사아자차카타파하"
+CIRCLED_DIGITS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+CIRCLED_HANGUL = "㉮㉯㉰㉱㉲㉳㉴㉵㉶㉷㉸㉹㉺㉻"
+
+
+def expected_number_marker(kind, n, sample):
+    """같은 단계의 n번째(1부터) 항목 번호 표기. 마침표·괄호는 현재 표기의 문자를 따른다. 범위를 넘으면 None."""
+    tail = sample[-1] if sample else ""
+    if kind == "digit_dot":
+        return "%d%s" % (n, tail if tail in ".．" else ".")
+    if kind == "digit_paren":
+        return "%d%s" % (n, tail if tail in ")）" else ")")
+    if kind == "hangul_dot":
+        return (HANGUL_SEQ[n - 1] + (tail if tail in ".．" else ".")) if n <= len(HANGUL_SEQ) else None
+    if kind == "hangul_paren":
+        return (HANGUL_SEQ[n - 1] + (tail if tail in ")）" else ")")) if n <= len(HANGUL_SEQ) else None
+    if kind == "circled_digit":
+        return CIRCLED_DIGITS[n - 1] if n <= len(CIRCLED_DIGITS) else None
+    if kind == "circled_hangul":
+        return CIRCLED_HANGUL[n - 1] if n <= len(CIRCLED_HANGUL) else None
+    return None
+
+
+def _marker_action(doc, p, old, new, what):
+    return {"op": "replace_marker", "paragraph_index": p["index"], "from": old, "to": new,
+            "xml": "Contents/section%d.xml %s 의 hp:t 첫 글자 '%s' → '%s'" % (p.get("section", 0), p["path"], old, new),
+            "note": "텍스트 불변 원칙의 예외: %s 문자만 바꾼다(그 밖의 글자·공백은 그대로)" % what}
+
+
 def rule_item_number(doc):
+    """항목 번호(요구사항 + 2026-10-31 결정): 표준 체계 여부와 같은 단계 안의 순서(1부터, 상위 단계가 바뀌면 다시 1부터)를 검사하고
+    번호 문자를 교정한다. 본문 최상위의 텍스트 번호 항목만 대상(자동 번호·표 안은 제외)."""
     rc = doc.rule_cfg("ITEM_NUMBER")
-    results, skipped = [], []
     allowed = set(rc["allowed_kinds"])
     ex = rc["kind_examples"]
-    numbered = 0
-    for p in doc.text_paragraphs():
+    results, skipped = [], []
+    counters = {}   # 단계 -> 현재 번호
+    for p in doc.paragraphs:
+        h = p.get("hierarchy") or {}
+        kind = h.get("kind")
+        if kind == "item":
+            level = h["level"]
+            for lv in list(counters):
+                if lv > level:
+                    del counters[lv]
+            counters[level] = counters.get(level, 0) + 1
         m = p.get("list_marker")
         if not m or m.get("type") != "number":
             continue
@@ -1320,23 +1404,32 @@ def rule_item_number(doc):
         if role in STRUCTURAL_SKIP_ROLES:
             skipped.append((p, STRUCTURAL_SKIP_ROLES[role]))
             continue
-        if role in NUMBER_SKIP_ROLES:
-            skipped.append((p, "제목에 붙은 번호는 '항목 번호' 규칙의 적용 대상인지 명세에 명시되지 않음"))
-            continue
-        numbered += 1
         current = {"value": m["marker"], "display": "'%s' (%s 형식)" % (m["marker"], ex.get(m["kind"], m["kind"])),
                    "source": "문단 텍스트(번호는 본문 텍스트에 포함된 문자)"}
         expected = {"value": rc["allowed_kinds"], "display": rc["spec_text"], "basis": rc["spec_text"]}
-        if m["kind"] in allowed:
-            results.append(make_result(doc, "ITEM_NUMBER", PASS, "번호 형식 '%s' 는 표준 번호 체계에 포함" % ex[m["kind"]],
+        if m["kind"] not in allowed:
+            results.append(make_result(doc, "ITEM_NUMBER", FAIL, "번호 형식 '%s' 는 표준 번호 체계(1. 가. 1) 가) ① ㉮)에 없음" % ex.get(m["kind"], m["kind"]),
+                                       target_of(p), role_of(p), current, expected, fix_mode="manual_review",
+                                       recommendation="표준 체계 밖 표기는 자동으로 바꾸지 않음. 작성자가 1. 가. 1) 가) ① ㉮ 체계로 정리"))
+            continue
+        if kind != "item":
+            skipped.append((p, "본문 최상위 항목이 아님(표·차례·글상자 등) - 번호 순서 검사 대상 아님"))
+            continue
+        n = counters[h["level"]]
+        exp = expected_number_marker(m["kind"], n, m["marker"])
+        if exp is None:
+            results.append(make_result(doc, "ITEM_NUMBER", UNKNOWN, "%d번째 항목의 표준 표기가 없음" % n, target_of(p), role_of(p), current,
+                                       unknown_reason="해당 번호 체계의 표기 범위를 넘음", needed_info="표기 범위 확장"))
+            continue
+        expected = {"value": exp, "display": "'%s' (%d단계 %d번째)" % (exp, h["level"], n), "basis": rc["spec_text"]}
+        if m["marker"] == exp:
+            results.append(make_result(doc, "ITEM_NUMBER", PASS, "번호 '%s' 가 순서(%d번째)에 맞음" % (exp, n),
                                        target_of(p), role_of(p), current, expected))
         else:
-            results.append(make_result(doc, "ITEM_NUMBER", FAIL, "번호 형식 '%s' 는 표준 번호 체계(1. 가. 1) 가) ① ㉮)에 없음" % ex.get(m["kind"], m["kind"]),
-                                       target_of(p), role_of(p), current, expected))
-    if numbered:
-        results.append(make_result(doc, "ITEM_NUMBER", UNKNOWN, "번호의 상하위 순서(1. → 가. → …)는 판정하지 않음",
-                                   unknown_reason="항목 수준(상하위 관계)을 판단할 들여쓰기 1칸 단위가 미확정(FORMAT_SPEC 5)",
-                                   needed_info="들여쓰기 1칸의 실제 단위", extra={"sub_item": "번호 순서"}))
+            doc.marker_targets[p["index"]] = (m["marker"], exp)
+            results.append(make_result(doc, "ITEM_NUMBER", FAIL, "번호 '%s' ≠ 순서상 '%s' (%d단계 %d번째)" % (m["marker"], exp, h["level"], n),
+                                       target_of(p), role_of(p), current, expected,
+                                       fix_actions=[_marker_action(doc, p, m["marker"], exp, "항목 번호")]))
     return results + skip_group(doc, "ITEM_NUMBER", skipped)
 
 
@@ -1360,10 +1453,17 @@ BULLET_LOOKALIKES = {
 BULLET_SUGGEST = {"o": "ㅇ", "O": "ㅇ", "○": "ㅇ", "◦": "ㅇ", "·": "․", "ㆍ": "․", "‧": "․", "∙": "․", "•": "․",
                   "–": "-", "—": "-", "■": "□", "☐": "□"}
 def rule_item_bullet(doc):
+    """항목 기호(요구사항 4 + 2026-10-31 결정): 표준 기호 여부와 층위 순서(□ → ㅇ → - → ․)를 검사하고 기호 문자를 교정한다.
+    층위 규칙: 번호 항목·다른 문단 뒤의 첫 기호는 □, 아래로는 한 층위씩만(건너뛰면 바로 아래 층위 기호), 위로는 어느 층위든 복귀 가능."""
     rc = doc.rule_cfg("ITEM_BULLET")
-    results, skipped = [], []
     allowed = rc["allowed"]
-    for p in doc.text_paragraphs():
+    results, skipped = [], []
+    stack = []   # 열려 있는 기호 층위(본문 최상위 체인)
+    for p in doc.paragraphs:
+        h = p.get("hierarchy") or {}
+        kind = h.get("kind")
+        if kind in ("item", "other", "object", "unmapped_item"):
+            stack = []
         b = detect_bullet(p)
         if not b:
             continue
@@ -1373,16 +1473,39 @@ def rule_item_bullet(doc):
             continue
         current = {"value": b, "display": "%s (U+%04X)" % (b, ord(b[0])), "source": "문단 텍스트(기호는 본문 텍스트에 포함된 문자)"}
         expected = {"value": allowed, "display": " → ".join(allowed), "basis": rc["spec_text"]}
-        if b in BULLET_SUGGEST:
-            expected["suggested"] = BULLET_SUGGEST[b]
-            expected["display"] = "%s (표준 기호 %s)" % (BULLET_SUGGEST[b], " → ".join(allowed))
-        if b in allowed:
-            results.append(make_result(doc, "ITEM_BULLET", PASS, "기호 '%s' 는 표준 기호에 포함" % b,
+        if b not in allowed:
+            if b in BULLET_SUGGEST:
+                expected["suggested"] = BULLET_SUGGEST[b]
+                expected["display"] = "%s (표준 기호 %s)" % (BULLET_SUGGEST[b], " → ".join(allowed))
+            why = BULLET_LOOKALIKES.get(b, "표준 기호(□ ㅇ - ․)에 없는 문자")
+            results.append(make_result(doc, "ITEM_BULLET", FAIL, "기호 '%s': %s" % (b, why), target_of(p), role_of(p), current, expected,
+                                       fix_mode="manual_review", recommendation="표준 밖 기호는 자동으로 바꾸지 않음. 작성자가 표준 기호로 정리"))
+            continue
+        if kind != "bullet":
+            results.append(make_result(doc, "ITEM_BULLET", PASS, "기호 '%s' 는 표준 기호에 포함(층위 순서는 본문 최상위 항목만 검사)" % b,
+                                       target_of(p), role_of(p), current, expected))
+            continue
+        level = allowed.index(b) + 1
+        if not stack:
+            exp_level = 1
+        elif level > stack[-1] + 1:
+            exp_level = stack[-1] + 1
+        else:
+            exp_level = level
+        while stack and stack[-1] >= exp_level:
+            stack.pop()
+        stack.append(exp_level)
+        exp = allowed[exp_level - 1]
+        expected = {"value": exp, "display": "'%s' (%d층위)" % (exp, exp_level), "basis": rc["spec_text"]}
+        if exp == b:
+            results.append(make_result(doc, "ITEM_BULLET", PASS, "기호 '%s' 가 층위 순서(%d층위)에 맞음" % (b, exp_level),
                                        target_of(p), role_of(p), current, expected))
         else:
-            why = BULLET_LOOKALIKES.get(b, "표준 기호(□ ㅇ - ․)에 없는 문자")
-            results.append(make_result(doc, "ITEM_BULLET", FAIL, "기호 '%s': %s" % (b, why),
-                                       target_of(p), role_of(p), current, expected))
+            why = "첫 기호는 □" if exp_level == 1 else "'%s' 다음 층위는 '%s'(건너뛸 수 없음)" % (allowed[exp_level - 2], exp)
+            doc.marker_targets[p["index"]] = (b, exp)
+            results.append(make_result(doc, "ITEM_BULLET", FAIL, "기호 '%s' ≠ 층위상 '%s' (%s)" % (b, exp, why),
+                                       target_of(p), role_of(p), current, expected,
+                                       fix_actions=[_marker_action(doc, p, b, exp, "항목 기호")]))
     return results + skip_group(doc, "ITEM_BULLET", skipped)
 
 
@@ -1626,6 +1749,7 @@ RULES = [
     ("PAPER_ORIENTATION", rule_paper_orientation),
     ("PAGE_MARGIN", rule_page_margin),
     ("HEADER_FOOTER_MARGIN", rule_header_footer_margin),
+    ("PAGE_NUMBER", rule_page_number),
     ("WORD_BREAK", rule_word_break),
     ("FONT", rule_font),
     ("FONT_SIZE", rule_font_size),

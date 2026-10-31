@@ -339,7 +339,8 @@ class HangingIndentTest(unittest.TestCase):
     def test_width_estimate_by_char_count(self):
         # 14pt 기준: 한글·기호·※ 1칸 = 14pt, 공백·숫자·괄호·마침표·* 0.5칸 = 7pt
         # '1.'/'가.' 는 대제목 16pt/중제목 15pt 로 바뀔 예정이므로 그 크기로 계산한다
-        cases = [("□ 항목", 21.0), ("  □ 앞 공백", 35.0), ("ㅇ 세부", 21.0), ("- 하위", 14.0),
+        # 문단 하나뿐이면 첫 기호는 □ 로 교정되므로 '- 하위' 도 □ 기준(21pt)으로 계산된다
+        cases = [("□ 항목", 21.0), ("  □ 앞 공백", 35.0), ("ㅇ 세부", 21.0), ("- 하위", 21.0),
                  ("1) 번호", 21.0), ("가. 번호", 30.0), ("1. 번호", 24.0), ("※ 주석", 21.0), ("* 주석", 14.0)]
         for text, width in cases:
             r, _ = self._align([P(text, indent=0)])
@@ -662,3 +663,51 @@ class PageBreakHeadingTest(unittest.TestCase):
         paras = [P("1. 첫", layout=MID), P("", objects=["T0"]), P("2. 둘", layout=LAST), P("본문", layout=FIRST)]
         by_idx, _ = page_break(paras)
         self.assertEqual([a["op"] for a in by_idx[2]["fix"]["actions"]], ["set_page_break"])
+
+
+def numbers(paragraphs, **kw):
+    return rule_results(paragraphs, "ITEM_NUMBER", **kw)
+
+
+def bullets(paragraphs, **kw):
+    return rule_results(paragraphs, "ITEM_BULLET", **kw)
+
+
+class ItemOrderTest(unittest.TestCase):
+    """2026-10-31 결정: 번호·기호 문자 교정(sample_puzzle1 → wannabe)."""
+
+    def test_number_sequence_per_level(self):
+        paras = [P("1. 추진배경"), P(" 가. 성과"), P("  1) 현황"), P("  2) 문제점"), P(" 다. 필요성"),
+                 P("2. 주요 추진내용"), P(" 가. 확대"), P(" 나. 고도화"), P(" 다. 확대"), P(" 바. 정비"),
+                 P("5. 향후 추진계획"), P(" 가. 일정"), P("5. 협조 요청사항")]
+        by_idx, res = numbers(paras)
+        fails = {i: (r["current"]["value"], r["expected"]["value"]) for i, r in by_idx.items() if r["status"] == "FAIL"}
+        self.assertEqual(fails, {4: ("다.", "나."), 9: ("바.", "라."), 10: ("5.", "3."), 12: ("5.", "4.")})
+        for i in (0, 1, 2, 3, 5, 6, 7, 8, 11):
+            self.assertEqual(by_idx[i]["status"], "PASS", i)
+        a = by_idx[4]["fix"]["actions"][0]
+        self.assertEqual((a["op"], a["paragraph_index"], a["from"], a["to"]), ("replace_marker", 4, "다.", "나."))
+        self.assertTrue(any(x["op"] == "replace_marker" and x["paragraphs"] == [10] for x in res["fix_plan"]["auto_actions"]))
+
+    def test_other_kinds(self):
+        by_idx, _ = numbers([P("1. 개요"), P(" 가. 배경"), P("  1) 현황"), P("   가) 세부"), P("   다) 세부"), P("    ①"), P("    ③")])
+        self.assertEqual([(by_idx[i]["status"], by_idx[i]["expected"]["value"]) for i in (4, 6)], [("FAIL", "나)"), ("FAIL", "②")])
+        by_idx, _ = numbers([P("Ⅰ. 로마"), P("(1) 괄호")])
+        for i in (0, 1):
+            self.assertEqual((by_idx[i]["status"], by_idx[i]["fix"]["possible"], by_idx[i]["fix"]["mode"]), ("FAIL", False, "manual_review"))
+
+    def test_bullet_levels(self):
+        paras = [P("1. 개요"), P("   □ 첫 항목"), P("    - 건너뛴 항목"), P("   □ 둘째 항목"), P("    ㅇ 세부"), P("     - 더 세부"),
+                 P("      ․ 가장 세부"), P("    ㅇ 복귀"), P("      ․ 두 층위 건너뜀"), P("가. 중제목"), P("  ㅇ 첫 기호가 ㅇ")]
+        by_idx, _ = bullets(paras)
+        fails = {i: (r["current"]["value"], r["expected"]["value"]) for i, r in by_idx.items() if r["status"] == "FAIL"}
+        self.assertEqual(fails, {2: ("-", "ㅇ"), 8: ("․", "-"), 10: ("ㅇ", "□")})
+        for i in (1, 3, 4, 5, 6, 7):
+            self.assertEqual(by_idx[i]["status"], "PASS", i)
+        by_idx, _ = bullets([P("□ 항목"), P("o 영문 o")])
+        self.assertEqual((by_idx[1]["status"], by_idx[1]["fix"]["possible"]), ("FAIL", False))
+
+    def test_hanging_uses_corrected_marker(self):
+        # '-'(0.5칸) → 'ㅇ'(1칸) 로 교정될 예정이면 내어쓰기 폭도 ㅇ 기준: 공백 7 + ㅇ 14 + 공백 7 = 28
+        out, _ = hanging([P("□ 항목", lines=2), P(" - 세부 항목", lines=2)])
+        self.assertEqual(out[(1, "둘째 줄 정렬")]["expected"]["value"]["indent_pt"], -28.0)

@@ -16,6 +16,7 @@ OP_LABEL = {
     "set_para_hanging_indent": "내어쓰기 설정", "set_para_align": "정렬 변경", "set_page_size": "용지 크기 변경",
     "set_char_size": "글자 크기 변경", "set_page_margin": "쪽 여백 변경", "set_cell_border": "표 양단선 제거",
     "set_page_break": "대제목 쪽 나눔 설정", "delete_empty_paragraph": "빈 문단 삭제(쪽 나눔 대제목 앞)",
+    "replace_marker": "항목 번호·기호 문자 교정", "add_page_number": "쪽 번호 추가",
     "set_para_word_break": "줄 나눔 기준 변경(어절 단위)",
 }
 
