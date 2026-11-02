@@ -52,6 +52,7 @@ class Bot:
         self.jobs = queue.Queue()
         self.me = None
         self.status_path = self.data_dir / "status.json"
+        self.greeted_path = self.data_dir / "greeted_users.json"  # 첫 인사를 보낸 사용자 id 목록
 
     # --- 상태 기록(배포 후 정상 동작 확인용) ---
     def write_status(self, **kw):
@@ -71,19 +72,47 @@ class Bot:
         file_ids = [self.client.upload_file(post["channel_id"], str(p)) for p in files if Path(p).is_file()]
         self.client.create_post(post["channel_id"], message, root_id=root, file_ids=file_ids[:10])
 
+    # --- 첫 인사 ---
+    def first_contact(self, user_id):
+        """이 사용자에게 처음 받은 글이면 True 를 돌려주고 인사 보냄을 기록한다(봇을 다시 시작해도 유지)."""
+        if not user_id:
+            return False
+        greeted = []
+        if self.greeted_path.is_file():
+            try:
+                greeted = json.loads(self.greeted_path.read_text(encoding="utf-8"))
+            except ValueError:
+                greeted = []
+        if user_id in greeted:
+            return False
+        greeted.append(user_id)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        tmp = self.greeted_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(greeted, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self.greeted_path)
+        return True
+
+    def help_text(self):
+        return handler.HELP_TEXT.format(bot=self.me["username"], max_mb=self.max_bytes // (1024 * 1024),
+                                        keep_days=self.keep_days)
+
     # --- 글 접수 ---
     def on_post(self, post):
         req = handler.parse_request(post.get("message"), self.me["username"])
+        first = self.first_contact(post.get("user_id"))
+        if first:
+            self.reply(post, handler.GREETING_TEXT)
         hwpx = []
         for fid in post.get("file_ids") or []:
             info = self.client.get_file_info(fid)
             if (info.get("extension") or "").lower() == "hwpx":
                 hwpx.append(info)
-        if req["mode"] == handler.MODE_HELP or not hwpx:
-            msg = handler.HELP_TEXT.format(bot=self.me["username"])
-            if req["mode"] != handler.MODE_HELP:
-                msg = "hwpx 파일이 첨부되지 않았습니다. (hwp 는 지원하지 않습니다. 한글에서 hwpx 로 저장해 주세요.)\n\n" + msg
-            self.reply(post, msg)
+        if req["mode"] == handler.MODE_HELP:
+            self.reply(post, self.help_text())
+            return
+        if not hwpx:
+            if not first:  # 첫 대화면 인사로 충분하다
+                self.reply(post, handler.NO_FILE_TEXT)
             return
         for info in hwpx:
             if info.get("size", 0) > self.max_bytes:

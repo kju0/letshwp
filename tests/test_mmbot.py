@@ -412,6 +412,60 @@ class BotFlowTest(unittest.TestCase):
         self.assertIn("hwpx 파일이 첨부되지 않았습니다", self.client.posts[0]["message"])
         self.assertTrue(self.bot.jobs.empty())
 
+    def test_no_hwpx_reply_is_short(self):
+        """파일 없이 말을 걸면 짧은 안내만 보낸다(상세 도움말은 `도움말` 요청 때만)."""
+        self.bot.on_post(self.post("안녕", []))
+        self.assertEqual(len(self.client.posts), 1)
+        self.assertNotIn("지금 맞춰 드리는 서식", self.client.posts[0]["message"])
+        self.assertIn("`도움말`", self.client.posts[0]["message"])
+
+    def user_post(self, user_id, message, file_ids):
+        p = self.post(message, file_ids)
+        p["user_id"] = user_id
+        return p
+
+    def test_greeting_only_on_first_contact(self):
+        self.bot.on_post(self.user_post("u1", "안녕하세요", []))
+        self.assertEqual(len(self.client.posts), 1)  # 첫 대화: 인사만(파일 없음 안내는 생략)
+        self.assertIn("letshwp 서식 봇입니다", self.client.posts[0]["message"])
+        self.assertIn("`도움말`", self.client.posts[0]["message"])
+        self.assertNotIn("웹", self.client.posts[0]["message"])
+        self.bot.on_post(self.user_post("u1", "안녕하세요", []))
+        self.assertEqual(len(self.client.posts), 2)  # 두 번째: 인사 없이 파일 없음 안내
+        self.assertNotIn("letshwp 서식 봇입니다", self.client.posts[1]["message"])
+        self.assertIn("hwpx 파일이 첨부되지 않았습니다", self.client.posts[1]["message"])
+        # 다른 사람에게는 따로 한 번
+        self.bot.on_post(self.user_post("u2", "", []))
+        self.assertIn("letshwp 서식 봇입니다", self.client.posts[2]["message"])
+
+    def test_greeting_then_file_is_processed(self):
+        self.bot.on_post(self.user_post("u1", "", ["f1"]))
+        self.assertIn("letshwp 서식 봇입니다", self.client.posts[0]["message"])
+        self.assertIn("접수했습니다", self.client.posts[1]["message"])
+        self.drain()
+        self.assertIn("**서식 수정 완료**", self.client.posts[-1]["message"])
+
+    def test_greeting_remembered_after_restart(self):
+        self.bot.on_post(self.user_post("u1", "", []))
+        bot2 = Bot(self.client, self.dir / "data")
+        bot2.me = self.client.get_me()
+        bot2.on_post(self.user_post("u1", "", []))
+        self.assertEqual(sum("letshwp 서식 봇입니다" in p["message"] for p in self.client.posts), 1)
+        greeted = json.loads((self.dir / "data" / "greeted_users.json").read_text(encoding="utf-8"))
+        self.assertEqual(greeted, ["u1"])
+
+    def test_help_is_detailed(self):
+        self.bot.on_post(self.user_post("u1", "도움말", []))
+        self.bot.on_post(self.user_post("u1", "@letshwp 도움말", []))
+        help_msg = self.client.posts[-1]["message"]
+        self.assertIn("지금 맞춰 드리는 서식", help_msg)
+        self.assertIn("준비 중인 기능", help_msg)
+        self.assertIn("50MB", help_msg)
+        self.assertIn("30일", help_msg)
+        self.assertNotIn("웹", help_msg)
+        self.assertNotIn("{", help_msg)
+        self.assertTrue(self.bot.jobs.empty())
+
     def test_too_large_file_rejected(self):
         self.bot.max_bytes = 10
         self.bot.on_post(self.post("", ["f1"]))
